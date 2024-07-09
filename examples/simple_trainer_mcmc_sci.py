@@ -9,10 +9,12 @@ import imageio
 import numpy as np
 import torch
 import torch.nn.functional as F
+# import torch.distributed as dist
 import tqdm
 import tyro
 import viser
 import nerfview
+from pose_viewer import PoseViewer
 from datasets.colmap import Dataset, Parser
 from datasets.traj import generate_interpolated_path
 from torch import Tensor
@@ -41,11 +43,11 @@ class Config:
     # Path to the Mip-NeRF 360 dataset
     data_dir: str = "data/360_v2/garden"
     # Downsample factor for the dataset
-    data_factor: int = 4
+    data_factor: int = 1 # cannot downsample w/ SCI
     # Directory to save results
     result_dir: str = "results/garden"
     # Every N images there is a test image
-    test_every: int = 8
+    test_every: int = 8 # not used in our case
     # Random crop size for training  (experimental)
     patch_size: Optional[int] = None
     # A global scaler that applies to the scene size related parameters
@@ -55,14 +57,14 @@ class Config:
     port: int = 8080
 
     # Batch size for training. Learning rates are scaled automatically
-    batch_size: int = 1
+    batch_size: int = 1 
     # A global factor to scale the number of training steps
     steps_scaler: float = 1.0
 
     # Number of training steps
     max_steps: int = 30_000
     # Steps to evaluate the model
-    eval_steps: List[int] = field(default_factory=lambda: [7_000, 30_000])
+    eval_steps: List[int] = field(default_factory=lambda: [1_000, 3_000, 5_000, 7_000, 10_000, 12_000, 15_000, 17_000, 20_000, 30_000])
     # Steps to save the model
     save_steps: List[int] = field(default_factory=lambda: [7_000, 30_000])
 
@@ -184,13 +186,19 @@ class Runner:
             normalize=True,
             test_every=cfg.test_every,
         )
+
+        self.num_imgs = len(self.parser.image_names)
+
+        # TODO: revise dataset to train and test w/ all images
+        # add a flag?
         self.trainset = Dataset(
             self.parser,
-            split="train",
+            split="all",
             patch_size=cfg.patch_size,
             load_depths=cfg.depth_loss,
         )
-        self.valset = Dataset(self.parser, split="val")
+        self.valset = Dataset(self.parser, split="all")
+
         self.scene_scale = self.parser.scene_scale * 1.1 * cfg.global_scale
         print("Scene scale:", self.scene_scale)
 
@@ -258,8 +266,12 @@ class Runner:
         # Viewer
         if not self.cfg.disable_viewer:
             self.server = viser.ViserServer(port=cfg.port, verbose=False)
-            self.viewer = nerfview.Viewer(
-                server=self.server,
+            # self.viewer = nerfview.Viewer(
+            #     server=self.server,
+            #     render_fn=self._viewer_render_fn,
+            #     mode="training",
+            # )
+            self.viewer = PoseViewer(server=self.server,
                 render_fn=self._viewer_render_fn,
                 mode="training",
             )
@@ -338,13 +350,15 @@ class Runner:
 
         trainloader = torch.utils.data.DataLoader(
             self.trainset,
-            batch_size=cfg.batch_size,
-            shuffle=True,
+            batch_size=self.num_imgs,
+            shuffle=False,
             num_workers=4,
             persistent_workers=True,
             pin_memory=True,
         )
-        trainloader_iter = iter(trainloader)
+        # trainloader_iter = iter(trainloader)
+
+        self._init_viewer_state()
 
         # Training loop.
         global_tic = time.time()
@@ -356,63 +370,78 @@ class Runner:
                 self.viewer.lock.acquire()
                 tic = time.time()
 
-            try:
-                data = next(trainloader_iter)
-            except StopIteration:
-                trainloader_iter = iter(trainloader)
-                data = next(trainloader_iter)
+            # try:
+            #     data = next(trainloader_iter)
+            # except StopIteration:
+            #     trainloader_iter = iter(trainloader)
+            #     data = next(trainloader_iter)
 
-            camtoworlds = camtoworlds_gt = data["camtoworld"].to(device)  # [1, 4, 4]
-            Ks = data["K"].to(device)  # [1, 3, 3]
-            pixels = data["image"].to(device) / 255.0  # [1, H, W, 3]
-            num_train_rays_per_step = (
-                pixels.shape[0] * pixels.shape[1] * pixels.shape[2]
-            )
-            image_ids = data["image_id"].to(device)
-            if cfg.depth_loss:
-                points = data["points"].to(device)  # [1, M, 2]
-                depths_gt = data["depths"].to(device)  # [1, M]
+            # trainloader_iter = iter(trainloader)
+            
+            # TODO: probably could process this in a batch
+            for data in trainloader:
 
-            height, width = pixels.shape[1:3]
+                camtoworlds = camtoworlds_gt = data["camtoworld"].to(device)  # [N, 4, 4]
+                Ks = data["K"].to(device)  # [N, 3, 3]
+                pixels = data["image"].to(device) / 255.0  # [N, H, W, 3]
+                num_train_rays_per_step = (
+                    pixels.shape[0] * pixels.shape[1] * pixels.shape[2]
+                )
+                image_ids = data["image_id"].to(device)
+                if cfg.depth_loss:
+                    points = data["points"].to(device)  # [1, M, 2]
+                    depths_gt = data["depths"].to(device)  # [1, M]
 
-            if cfg.pose_noise:
-                camtoworlds = self.pose_perturb(camtoworlds, image_ids)
+                height, width = pixels.shape[1:3]
 
-            if cfg.pose_opt:
-                camtoworlds = self.pose_adjust(camtoworlds, image_ids)
+                if cfg.pose_noise:
+                    camtoworlds = self.pose_perturb(camtoworlds, image_ids)
 
-            # sh schedule
-            sh_degree_to_use = min(step // cfg.sh_degree_interval, cfg.sh_degree)
+                if cfg.pose_opt:
+                    camtoworlds = self.pose_adjust(camtoworlds, image_ids)
 
-            # forward
-            renders, alphas, info = self.rasterize_splats(
-                camtoworlds=camtoworlds,
-                Ks=Ks,
-                width=width,
-                height=height,
-                sh_degree=sh_degree_to_use,
-                near_plane=cfg.near_plane,
-                far_plane=cfg.far_plane,
-                image_ids=image_ids,
-                render_mode="RGB+ED" if cfg.depth_loss else "RGB",
-            )
-            if renders.shape[-1] == 4:
-                colors, depths = renders[..., 0:3], renders[..., 3:4]
-            else:
-                colors, depths = renders, None
+                # sh schedule
+                sh_degree_to_use = min(step // cfg.sh_degree_interval, cfg.sh_degree)
 
-            if cfg.random_bkgd:
-                bkgd = torch.rand(1, 3, device=device)
-                colors = colors + bkgd * (1.0 - alphas)
+                # forward
+                renders, alphas, info = self.rasterize_splats(
+                    camtoworlds=camtoworlds,
+                    Ks=Ks,
+                    width=width,
+                    height=height,
+                    sh_degree=sh_degree_to_use,
+                    near_plane=cfg.near_plane,
+                    far_plane=cfg.far_plane,
+                    image_ids=image_ids,
+                    render_mode="RGB+ED" if cfg.depth_loss else "RGB",
+                )
+                if renders.shape[-1] == 4:
+                    colors, depths = renders[..., 0:3], renders[..., 3:4]
+                else:
+                    colors, depths = renders, None
 
-            info["means2d"].retain_grad()  # used for running stats
+                if cfg.random_bkgd:
+                    bkgd = torch.rand(1, 3, device=device)
+                    colors = colors + bkgd * (1.0 - alphas)
+
+                info["means2d"].retain_grad()  # used for running stats
+
+                if "mask" in data:
+                    mask = data["mask"].to(device)
+                    assert mask.shape[:2] == pixels.shape[:2] == colors.shape[:2]
+                    pixels = pixels * mask
+                    colors = colors * mask
+            
+            comp_gt_img = pixels.sum(0).unsqueeze(0)
+            comp_img = colors.sum(0).unsqueeze(0)
 
             # loss
-            l1loss = F.l1_loss(colors, pixels)
+            l1loss = F.l1_loss(comp_img, comp_gt_img)
             ssimloss = 1.0 - self.ssim(
-                pixels.permute(0, 3, 1, 2), colors.permute(0, 3, 1, 2)
+                comp_gt_img.permute(0, 3, 1, 2), comp_img.permute(0, 3, 1, 2)
             )
             loss = l1loss * (1.0 - cfg.ssim_lambda) + ssimloss * cfg.ssim_lambda
+            
             if cfg.depth_loss:
                 # query depths from depth map
                 points = torch.stack(
@@ -536,7 +565,8 @@ class Runner:
             # eval the full set
             if step in [i - 1 for i in cfg.eval_steps] or step == max_steps - 1:
                 self.eval(step)
-                self.render_traj(step)
+                # self.render_traj(step)
+                self.render_traj_all(step)
 
             if not cfg.disable_viewer:
                 self.viewer.lock.release()
@@ -785,6 +815,59 @@ class Runner:
         print(f"Video saved to {video_dir}/traj_{step}.mp4")
 
     @torch.no_grad()
+    def render_traj_all(self, step: int):
+        """Entry for trajectory rendering."""
+        print("Running trajectory rendering...")
+        cfg = self.cfg
+        device = self.device
+
+        camtoworlds = self.parser.camtoworlds[:]
+        camtoworlds = generate_interpolated_path(camtoworlds, 5)  # [N, 3, 4]
+        camtoworlds = np.concatenate(
+            [
+                camtoworlds,
+                np.repeat(np.array([[[0.0, 0.0, 0.0, 1.0]]]), len(camtoworlds), axis=0),
+            ],
+            axis=1,
+        )  # [N, 4, 4]
+
+        camtoworlds = torch.from_numpy(camtoworlds).float().to(device)
+        K = torch.from_numpy(list(self.parser.Ks_dict.values())[0]).float().to(device)
+        width, height = list(self.parser.imsize_dict.values())[0]
+
+        canvas_all = []
+        for i in tqdm.trange(len(camtoworlds), desc="Rendering trajectory"):
+            renders, _, _ = self.rasterize_splats(
+                camtoworlds=camtoworlds[i : i + 1],
+                Ks=K[None],
+                width=width,
+                height=height,
+                sh_degree=cfg.sh_degree,
+                near_plane=cfg.near_plane,
+                far_plane=cfg.far_plane,
+                render_mode="RGB+ED",
+            )  # [1, H, W, 4]
+            colors = torch.clamp(renders[0, ..., 0:3], 0.0, 1.0)  # [H, W, 3]
+            depths = renders[0, ..., 3:4]  # [H, W, 1]
+            depths = (depths - depths.min()) / (depths.max() - depths.min())
+
+            # write images
+            canvas = torch.cat(
+                [colors, depths.repeat(1, 1, 3)], dim=0 if width > height else 1
+            )
+            canvas = (canvas.cpu().numpy() * 255).astype(np.uint8)
+            canvas_all.append(canvas)
+
+        # save to video
+        video_dir = f"{cfg.result_dir}/videos"
+        os.makedirs(video_dir, exist_ok=True)
+        writer = imageio.get_writer(f"{video_dir}/traj_{step}.mp4", fps=30)
+        for canvas in canvas_all:
+            writer.append_data(canvas)
+        writer.close()
+        print(f"Video saved to {video_dir}/traj_{step}.mp4")
+
+    @torch.no_grad()
     def _viewer_render_fn(
         self, camera_state: nerfview.CameraState, img_wh: Tuple[int, int]
     ):
@@ -804,6 +887,12 @@ class Runner:
             radius_clip=3.0,  # skip GSs that have small image radius (in pixels)
         )  # [1, H, W, 3]
         return render_colors[0].cpu().numpy()
+
+    def _init_viewer_state(self) -> None:
+        """Initializes viewer scene with given train dataset"""
+        if not cfg.disable_viewer:
+            assert self.viewer and self.trainset
+            self.viewer.init_scene(train_dataset=self.trainset, train_state="training")
 
 
 def main(cfg: Config):
