@@ -5,6 +5,7 @@ import cv2
 import imageio.v2 as imageio
 import numpy as np
 import torch
+from PIL import Image
 from pycolmap import SceneManager
 
 from .normalize import (
@@ -142,12 +143,20 @@ class Parser:
             if not os.path.exists(d):
                 raise ValueError(f"Image folder {d} does not exist.")
 
+        # construct masks path
+        mask_dir = os.path.join(data_dir, "masks")
+
         # Downsampled images may have different names vs images used for COLMAP,
         # so we need to map between the two sorted lists of files.
         colmap_files = sorted(_get_rel_paths(colmap_image_dir))
         image_files = sorted(_get_rel_paths(image_dir))
         colmap_to_image = dict(zip(colmap_files, image_files))
         image_paths = [os.path.join(image_dir, colmap_to_image[f]) for f in image_names]
+
+        # get masks path
+        if os.path.exists(mask_dir):
+            mask_paths = [os.path.join(mask_dir, f) for f in image_names]
+            self.mask_paths = mask_paths
 
         # 3D points and {image_name -> [point_idx]}
         points = manager.points3D.astype(np.float32)
@@ -241,6 +250,8 @@ class Dataset:
         indices = np.arange(len(self.parser.image_names))
         if split == "train":
             self.indices = indices[indices % self.parser.test_every != 0]
+        elif split == "all":
+            self.indices = indices
         else:
             self.indices = indices[indices % self.parser.test_every == 0]
 
@@ -249,7 +260,7 @@ class Dataset:
 
     def __getitem__(self, item: int) -> Dict[str, Any]:
         index = self.indices[item]
-        image = imageio.imread(self.parser.image_paths[index])[..., :3]
+        image = imageio.imread(self.parser.image_paths[index])[..., :3]            
         camera_id = self.parser.camera_ids[index]
         K = self.parser.Ks_dict[camera_id].copy()  # undistorted K
         params = self.parser.params_dict[camera_id]
@@ -280,6 +291,13 @@ class Dataset:
             "image": torch.from_numpy(image).float(),
             "image_id": item,  # the index of the image in the dataset
         }
+
+        if self.parser.mask_paths:
+            pil_mask = Image.open(self.parser.mask_paths[index])
+            mask_tensor = torch.from_numpy(np.array(pil_mask)).unsqueeze(-1).bool()
+            if len(mask_tensor.shape) != 3:
+                raise ValueError("The mask image should have 1 channel")
+            data["mask"] = mask_tensor
 
         if self.load_depths:
             # projected points to image plane to get depths
