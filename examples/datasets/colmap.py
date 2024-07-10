@@ -292,7 +292,7 @@ class Dataset:
             "image_id": item,  # the index of the image in the dataset
         }
 
-        if self.parser.mask_paths:
+        if hasattr(self.parser, 'mask_paths'):
             pil_mask = Image.open(self.parser.mask_paths[index])
             mask_tensor = torch.from_numpy(np.array(pil_mask)).unsqueeze(-1).bool()
             if len(mask_tensor.shape) != 3:
