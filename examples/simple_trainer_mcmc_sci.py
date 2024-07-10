@@ -578,6 +578,8 @@ class Runner:
                 self.viewer.state.num_train_rays_per_sec = num_train_rays_per_sec
                 # Update the scene.
                 self.viewer.update(step, num_train_rays_per_step)
+                # Update camera poses, this only works for the SCI case for now
+                self.viewer.update_camera_poses(camtoworlds)
 
     @torch.no_grad()
     def relocate_gs(self, min_opacity: float = 0.005) -> int:
@@ -694,6 +696,7 @@ class Runner:
     @torch.no_grad()
     def eval(self, step: int):
         """Entry for evaluation."""
+        # TODO: poses should be replaced if optimized
         print("Running evaluation...")
         cfg = self.cfg
         device = self.device
@@ -764,6 +767,7 @@ class Runner:
     @torch.no_grad()
     def render_traj(self, step: int):
         """Entry for trajectory rendering."""
+        # TODO: poses should be replaced if optimized
         print("Running trajectory rendering...")
         cfg = self.cfg
         device = self.device

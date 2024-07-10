@@ -11,6 +11,7 @@ from nerfview.viewer import Viewer
 
 from nerfview._renderer import RenderTask
 
+# not used for now
 VISER_NERFSTUDIO_SCALE_RATIO: float = 10.0
 
 class PoseViewer(Viewer):
@@ -21,6 +22,7 @@ class PoseViewer(Viewer):
         self.original_c2w: Dict[int, np.ndarray] = {}
 
         total_num = len(train_dataset)
+        # NOTE: not constraining the maximum number of camera frustums shown
         image_indices = np.linspace(0, total_num - 1, total_num, dtype=np.int32).tolist()
         for idx in image_indices:
             image = train_dataset[idx]["image"]
@@ -37,6 +39,7 @@ class PoseViewer(Viewer):
             c2w = train_dataset[idx]["camtoworld"].cpu().numpy()
             R = vtf.SO3.from_matrix(c2w[:3, :3])
             # NOTE: not understand why this is needed in nerfstudio viewer, but comment it out make ours work
+            # probably because gsplat uses OpenCV convention, whereas nerfstudio use the Blender / OpenGL convention
             # R = R @ vtf.SO3.from_x_radians(np.pi)
 
             K = train_dataset[idx]["K"].cpu().numpy()
@@ -50,7 +53,7 @@ class PoseViewer(Viewer):
                 aspect=float(cx / cy),
                 image=image_uint8,
                 wxyz=R.wxyz,
-                position=c2w[:3, 3], # NOTE: not multiplied by VISER_NERFSTUDIO_SCALE_RATIO
+                position=c2w[:3, 3], # NOTE: not multiplied by VISER_NERFSTUDIO_SCALE_RATIO, this should also be used in get_camera_state
             )
 
             @camera_handle.on_click
@@ -65,3 +68,21 @@ class PoseViewer(Viewer):
         self.state.status = train_state
         # self.train_util = 0.9
     
+    def update_camera_poses(self, camtoworlds):
+        assert self.camera_handles is not None
+        # TODO: update poses of camera
+
+        idxs = list(self.camera_handles.keys())
+
+        with torch.no_grad():
+            c2ws = camtoworlds
+        
+        for i, key in enumerate(idxs):
+
+            c2w = c2ws[i].detach().cpu().numpy()
+
+            R = vtf.SO3.from_matrix(c2w[:3, :3])  # type: ignore
+            # R = R @ vtf.SO3.from_x_radians(np.pi)
+
+            self.camera_handles[key].position = c2w[:3, 3]
+            self.camera_handles[key].wxyz = R.wxyz
