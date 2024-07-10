@@ -13,6 +13,7 @@ import tqdm
 import tyro
 import viser
 import nerfview
+from pose_viewer import PoseViewer
 from datasets.colmap import Dataset, Parser
 from datasets.traj import generate_interpolated_path
 from torch import Tensor
@@ -258,8 +259,12 @@ class Runner:
         # Viewer
         if not self.cfg.disable_viewer:
             self.server = viser.ViserServer(port=cfg.port, verbose=False)
-            self.viewer = nerfview.Viewer(
-                server=self.server,
+            # self.viewer = nerfview.Viewer(
+            #     server=self.server,
+            #     render_fn=self._viewer_render_fn,
+            #     mode="training",
+            # )
+            self.viewer = PoseViewer(server=self.server,
                 render_fn=self._viewer_render_fn,
                 mode="training",
             )
@@ -345,6 +350,8 @@ class Runner:
             pin_memory=True,
         )
         trainloader_iter = iter(trainloader)
+
+        self._init_viewer_state()
 
         # Training loop.
         global_tic = time.time()
@@ -804,6 +811,12 @@ class Runner:
             radius_clip=3.0,  # skip GSs that have small image radius (in pixels)
         )  # [1, H, W, 3]
         return render_colors[0].cpu().numpy()
+
+    def _init_viewer_state(self) -> None:
+        """Initializes viewer scene with given train dataset"""
+        if not cfg.disable_viewer:
+            assert self.viewer and self.trainset
+            self.viewer.init_scene(train_dataset=self.trainset, train_state="training")
 
 
 def main(cfg: Config):
