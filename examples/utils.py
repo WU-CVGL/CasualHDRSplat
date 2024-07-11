@@ -1,11 +1,39 @@
 import random
 
+import pypose as pp
 import numpy as np
 import torch
 from sklearn.neighbors import NearestNeighbors
 from torch import Tensor
 import torch.nn.functional as F
 
+from spline_function import bezier_interpolation
+
+class PoseOptModule(torch.nn.Module):
+    """Camera pose optimization module w/ Bezier curve"""
+
+    def __init__(self, camera_to_worlds, bezier_degree=10, initial_noise=1e-5):
+        super().__init__()
+
+        self.num_views = camera_to_worlds.shape[0]
+
+        poses_control_knots_SE3 = pp.mat2SE3(camera_to_worlds)
+        poses_control_knots_SE3_mid = poses_control_knots_SE3[self.num_views//2]
+        poses_control_knots_SE3 = poses_control_knots_SE3_mid.unsqueeze(0).repeat(bezier_degree,1).unsqueeze(0)
+        poses_control_knots_se3 = poses_control_knots_SE3.Log()
+
+        poses_noise_se3 = pp.randn_se3(1, bezier_degree, sigma=initial_noise)
+        poses_control_knots_se3 += poses_noise_se3
+
+        self.pose_control_knots = pp.Parameter(poses_control_knots_se3)
+    
+    def get_poses(self):
+        # TODO: check if the device assignment here is legit
+        u = torch.linspace(start=0, end=1, steps=self.num_views, device=self.pose_control_knots.device)
+        poses = bezier_interpolation(self.pose_control_knots.Exp(), u)
+        poses = poses.matrix()[0] # (N, 4, 4)
+
+        return poses
 
 class CameraOptModule(torch.nn.Module):
     """Camera pose optimization module."""
@@ -172,3 +200,18 @@ def set_random_seed(seed: int):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
+
+if __name__ == "__main__":
+    # test PoseOptModule
+    camera_to_worlds = torch.eye(4).unsqueeze(0).repeat(10, 1, 1)
+
+    pose_opt = PoseOptModule(camera_to_worlds, bezier_degree=5)
+
+    poses = pose_opt.get_poses()
+
+    print(poses)
+
+    # Inspect all parameters
+    print("\nParameters:")
+    for name, param in pose_opt.named_parameters():
+        print(f"Name: {name}, Shape: {param.shape}, Requires Grad: {param.requires_grad}")
