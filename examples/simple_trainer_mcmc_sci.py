@@ -22,6 +22,7 @@ from torch.utils.tensorboard import SummaryWriter
 from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 from utils import (
+    PoseOptModule,
     AppearanceOptModule,
     CameraOptModule,
     set_random_seed,
@@ -126,6 +127,10 @@ class Config:
     pose_opt_reg: float = 1e-6
     # Add noise to camera extrinsics. This is only to test the camera pose optimization.
     pose_noise: float = 0.0
+    # degree of Bezier curve
+    bezier_degree: int = 8
+    # initial noise for pose
+    initial_noise: float = 1e-5
 
     # Enable appearance optimization. (experimental)
     app_opt: bool = False
@@ -222,12 +227,21 @@ class Runner:
 
         self.pose_optimizers = []
         if cfg.pose_opt:
-            self.pose_adjust = CameraOptModule(len(self.trainset)).to(self.device)
-            self.pose_adjust.zero_init()
+            # self.pose_adjust = CameraOptModule(len(self.trainset)).to(self.device)
+            # self.pose_adjust.zero_init()
+            # self.pose_optimizers = [
+            #     torch.optim.Adam(
+            #         self.pose_adjust.parameters(),
+            #         lr=cfg.pose_opt_lr * math.sqrt(cfg.batch_size),
+            #         weight_decay=cfg.pose_opt_reg,
+            #     )
+            # ]
+
+            self.pose_adjust = PoseOptModule(self.parser.camtoworlds, cfg.bezier_degree, cfg.initial_noise).to(self.device)
             self.pose_optimizers = [
                 torch.optim.Adam(
                     self.pose_adjust.parameters(),
-                    lr=cfg.pose_opt_lr * math.sqrt(cfg.batch_size),
+                    lr=cfg.pose_opt_lr,
                     weight_decay=cfg.pose_opt_reg,
                 )
             ]
@@ -398,7 +412,7 @@ class Runner:
                     camtoworlds = self.pose_perturb(camtoworlds, image_ids)
 
                 if cfg.pose_opt:
-                    camtoworlds = self.pose_adjust(camtoworlds, image_ids)
+                    camtoworlds = self.pose_adjust.get_poses().to(torch.float32)
 
                 # sh schedule
                 sh_degree_to_use = min(step // cfg.sh_degree_interval, cfg.sh_degree)
