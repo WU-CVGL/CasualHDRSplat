@@ -164,7 +164,7 @@ class Parser:
         points_rgb = manager.point3D_colors.astype(np.uint8)
         point_indices = dict()
 
-        image_id_to_name = {v: k for k, v in manager.name_to_image_id.items()}
+        image_id_to_name = {v: k for k, v in manager.name_to_image_id.items()} # {1: '00.png', ...}
         for point_id, data in manager.point3D_id_to_images.items():
             for image_id, _ in data:
                 image_name = image_id_to_name[image_id]
