@@ -15,6 +15,7 @@ from nerfview._renderer import RenderTask
 VISER_NERFSTUDIO_SCALE_RATIO: float = 10.0
 
 class PoseViewer(Viewer):
+
     def init_scene(self, 
                    train_dataset: Dataset, 
                    train_state: Literal["training", "paused", "completed"]) -> None:
@@ -49,7 +50,7 @@ class PoseViewer(Viewer):
             camera_handle = self.server.add_camera_frustum(
                 name=f"/cameras/camera_{idx:05d}",
                 fov=float(2 * np.arctan(cx / fx)),
-                scale=0.1, # hardcode this scale for now
+                scale=0.05, # hardcode this scale for now
                 aspect=float(cx / cy),
                 image=image_uint8,
                 wxyz=R.wxyz,
