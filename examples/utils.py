@@ -17,7 +17,7 @@ class PoseOptModule(torch.nn.Module):
 
         self.num_views = camera_to_worlds.shape[0]
 
-        poses_control_knots_SE3 = pp.mat2SE3(camera_to_worlds)
+        poses_control_knots_SE3 = pp.mat2SE3(camera_to_worlds, check=False) # NOTE: hack for now
         poses_control_knots_SE3_mid = poses_control_knots_SE3[self.num_views//2]
         poses_control_knots_SE3 = poses_control_knots_SE3_mid.unsqueeze(0).repeat(bezier_degree,1).unsqueeze(0)
         poses_control_knots_se3 = poses_control_knots_SE3.Log()
