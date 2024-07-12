@@ -15,6 +15,7 @@ import tyro
 import viser
 import nerfview
 from pose_viewer import PoseViewer
+from datasets.colmap_dataparser import ColmapParser
 from datasets.colmap import Dataset, Parser
 from datasets.traj import generate_interpolated_path
 from torch import Tensor
@@ -45,6 +46,8 @@ class Config:
     data_dir: str = "data/360_v2/garden"
     # Downsample factor for the dataset
     data_factor: int = 1 # cannot downsample w/ SCI
+    # How much to scale the camera origins by
+    scale_factor: float = 1.0
     # Directory to save results
     result_dir: str = "results/garden"
     # Every N images there is a test image
@@ -185,12 +188,14 @@ class Runner:
         self.writer = SummaryWriter(log_dir=f"{cfg.result_dir}/tb")
 
         # Load data: Training data should contain initial points and colors.
-        self.parser = Parser(
-            data_dir=cfg.data_dir,
-            factor=cfg.data_factor,
-            normalize=True,
-            test_every=cfg.test_every,
-        )
+        # self.parser = Parser(
+        #     data_dir=cfg.data_dir,
+        #     factor=cfg.data_factor,
+        #     normalize=False, #
+        #     test_every=cfg.test_every,
+        # )
+
+        self.parser = ColmapParser(data_dir=cfg.data_dir, factor=cfg.data_factor, scale_factor=cfg.scale_factor)
 
         self.num_imgs = len(self.parser.image_names)
 
@@ -392,7 +397,6 @@ class Runner:
 
             # trainloader_iter = iter(trainloader)
             
-            # TODO: probably could process this in a batch
             for data in trainloader:
 
                 camtoworlds = camtoworlds_gt = data["camtoworld"].to(device)  # [N, 4, 4]
@@ -710,7 +714,6 @@ class Runner:
     @torch.no_grad()
     def eval(self, step: int):
         """Entry for evaluation."""
-        # TODO: poses should be replaced if optimized
         print("Running evaluation...")
         cfg = self.cfg
         device = self.device
@@ -718,10 +721,19 @@ class Runner:
         valloader = torch.utils.data.DataLoader(
             self.valset, batch_size=1, shuffle=False, num_workers=1
         )
+
+        if self.cfg.pose_opt:
+            camtoworlds_all = self.pose_adjust.get_poses().to(torch.float32)
+
         ellipse_time = 0
         metrics = {"psnr": [], "ssim": [], "lpips": []}
         for i, data in enumerate(valloader):
-            camtoworlds = data["camtoworld"].to(device)
+            
+            if self.cfg.pose_opt:
+                camtoworlds = camtoworlds_all[i].unsqueeze(0).to(device)
+            else:
+                camtoworlds = data["camtoworld"].to(device)
+
             Ks = data["K"].to(device)
             pixels = data["image"].to(device) / 255.0
             height, width = pixels.shape[1:3]
@@ -839,7 +851,11 @@ class Runner:
         cfg = self.cfg
         device = self.device
 
-        camtoworlds = self.parser.camtoworlds[:]
+        if self.cfg.pose_opt:
+            camtoworlds = self.pose_adjust.get_poses().to(torch.float32).detach().cpu().numpy()
+        else:
+            camtoworlds = self.parser.camtoworlds[:]
+
         camtoworlds = generate_interpolated_path(camtoworlds, 5)  # [N, 3, 4]
         camtoworlds = np.concatenate(
             [
