@@ -29,6 +29,7 @@ from simple_trainer import create_splats_with_optimizers
 from utils import (
     AppearanceOptModule,
     BadCameraOptModule,
+    CameraOptModule,
     set_random_seed,
 )
 
@@ -148,6 +149,11 @@ class Config:
     # Save training images to tensorboard
     tb_save_image: bool = False
 
+    # BAD-Gaussians: Number of virtual cameras
+    num_virtual_views: int = 10
+    # BAD-Gaussians: Number of control knots
+    num_control_knots: int = 4
+
     def adjust_steps(self, factor: float):
         self.eval_steps = [int(i * factor) for i in self.eval_steps]
         self.save_steps = [int(i * factor) for i in self.save_steps]
@@ -217,7 +223,11 @@ class Runner:
 
         self.pose_optimizers = []
         if cfg.pose_opt:
-            self.pose_adjust = BadCameraOptModule(len(self.trainset), 4, 10).to(self.device)
+            self.pose_adjust = BadCameraOptModule(
+                len(self.trainset),
+                cfg.num_control_knots,
+                cfg.num_virtual_views
+            ).to(self.device)
             self.pose_adjust.zero_init()
             self.pose_optimizers = [
                 torch.optim.Adam(
@@ -228,7 +238,7 @@ class Runner:
             ]
 
         if cfg.pose_noise > 0.0:
-            self.pose_perturb = BadCameraOptModule(len(self.trainset), 4, 10).to(self.device)
+            self.pose_perturb = CameraOptModule(len(self.trainset)).to(self.device)
             self.pose_perturb.random_init(cfg.pose_noise)
 
         self.app_optimizers = []
@@ -379,9 +389,6 @@ class Runner:
                 depths_gt = data["depths"].to(device)  # [1, M]
 
             height, width = pixels.shape[1:3]
-
-            if cfg.pose_noise:
-                camtoworlds = self.pose_perturb(camtoworlds, image_ids)
 
             if cfg.pose_opt:
                 assert camtoworlds.shape[0] == 1
@@ -692,7 +699,6 @@ class Runner:
 
             if cfg.pose_opt:
                 camtoworlds = self.pose_adjust(camtoworlds, image_ids, "mid")
-
 
             torch.cuda.synchronize()
             tic = time.time()
