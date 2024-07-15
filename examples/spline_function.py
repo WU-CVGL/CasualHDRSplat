@@ -117,6 +117,9 @@ def cubic_bspline_interpolation(
         oos * uuu
     ], dim=-2)
 
+    if coeffs_t.device != ctrl_knots.device:
+        coeffs_t = coeffs_t.to(ctrl_knots.device)
+
     # spline t
     t_t = torch.sum(pp.bvv(coeffs_t, ctrl_knots.translation()), dim=-3)
 
@@ -126,6 +129,9 @@ def cubic_bspline_interpolation(
         oos + 0.5 * u + 0.5 * uu - 2 * oos * uuu,
         oos * uuu
     ], dim=-2)
+
+    if coeffs_r.device != ctrl_knots.device:
+        coeffs_r = coeffs_r.to(ctrl_knots.device)
 
     # spline q
     q_adjacent = ctrl_knots[..., :-1, :].rotation().Inv() @ ctrl_knots[..., 1:, :].rotation()

@@ -28,7 +28,7 @@ from pose_viewer import PoseViewer
 from simple_trainer import create_splats_with_optimizers
 from utils import (
     AppearanceOptModule,
-    CameraOptModule,
+    BadCameraOptModule,
     set_random_seed,
 )
 
@@ -41,13 +41,13 @@ class Config:
     ckpt: Optional[str] = None
 
     # Path to the Mip-NeRF 360 dataset
-    data_dir: str = "data/360_v2/garden"
+    data_dir: str = "/datasets/bad-gaussian/data/bad-nerf-gtK-colmap-nvs/blurtanabata"
     # Downsample factor for the dataset
-    data_factor: int = 4
+    data_factor: int = 1
     # How much to scale the camera origins by
     scale_factor: float = 1.0
     # Directory to save results
-    result_dir: str = "results/garden"
+    result_dir: str = "results/tanabata"
     # Every N images there is a test image
     test_every: int = 8
     # Random crop size for training  (experimental)
@@ -66,7 +66,7 @@ class Config:
     # Number of training steps
     max_steps: int = 30_000
     # Steps to evaluate the model
-    eval_steps: List[int] = field(default_factory=lambda: [7_000, 30_000])
+    eval_steps: List[int] = field(default_factory=lambda: [500, 3_000, 7_000, 10_000, 20_000, 30_000])
     # Steps to save the model
     save_steps: List[int] = field(default_factory=lambda: [7_000, 30_000])
 
@@ -121,11 +121,11 @@ class Config:
     random_bkgd: bool = False
 
     # Enable camera optimization.
-    pose_opt: bool = False
+    pose_opt: bool = True
     # Learning rate for camera optimization
-    pose_opt_lr: float = 1e-5
+    pose_opt_lr: float = 1e-3
     # Regularization for camera optimization as weight decay
-    pose_opt_reg: float = 1e-6
+    pose_opt_reg: float = 1e-5
     # Add noise to camera extrinsics. This is only to test the camera pose optimization.
     pose_noise: float = 0.0
 
@@ -217,7 +217,7 @@ class Runner:
 
         self.pose_optimizers = []
         if cfg.pose_opt:
-            self.pose_adjust = CameraOptModule(len(self.trainset)).to(self.device)
+            self.pose_adjust = BadCameraOptModule(len(self.trainset), 4, 10).to(self.device)
             self.pose_adjust.zero_init()
             self.pose_optimizers = [
                 torch.optim.Adam(
@@ -228,7 +228,7 @@ class Runner:
             ]
 
         if cfg.pose_noise > 0.0:
-            self.pose_perturb = CameraOptModule(len(self.trainset)).to(self.device)
+            self.pose_perturb = BadCameraOptModule(len(self.trainset), 4, 10).to(self.device)
             self.pose_perturb.random_init(cfg.pose_noise)
 
         self.app_optimizers = []
@@ -384,7 +384,10 @@ class Runner:
                 camtoworlds = self.pose_perturb(camtoworlds, image_ids)
 
             if cfg.pose_opt:
-                camtoworlds = self.pose_adjust(camtoworlds, image_ids)
+                assert camtoworlds.shape[0] == 1
+                camtoworlds = self.pose_adjust(camtoworlds, image_ids, "uniform")[0, :, ...]
+                num_cur_virt_views = camtoworlds.shape[0]
+                Ks = Ks.tile((num_cur_virt_views, 1, 1))
 
             # sh schedule
             sh_degree_to_use = min(step // cfg.sh_degree_interval, cfg.sh_degree)
@@ -409,6 +412,8 @@ class Runner:
             if cfg.random_bkgd:
                 bkgd = torch.rand(1, 3, device=device)
                 colors = colors + bkgd * (1.0 - alphas)
+
+            colors = colors.mean(0)[None]
 
             info["means2d"].retain_grad()  # used for running stats
 
@@ -683,6 +688,11 @@ class Runner:
             Ks = data["K"].to(device)
             pixels = data["image"].to(device) / 255.0
             height, width = pixels.shape[1:3]
+            image_ids = data["image_id"].to(device)
+
+            if cfg.pose_opt:
+                camtoworlds = self.pose_adjust(camtoworlds, image_ids, "mid")
+
 
             torch.cuda.synchronize()
             tic = time.time()
