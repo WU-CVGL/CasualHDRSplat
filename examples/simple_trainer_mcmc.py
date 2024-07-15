@@ -2,34 +2,35 @@ import json
 import math
 import os
 import time
-from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 import imageio
+import nerfview
 import numpy as np
 import torch
 import torch.nn.functional as F
 import tqdm
 import tyro
 import viser
-import nerfview
-from pose_viewer import PoseViewer
-from datasets.colmap import Dataset, Parser
-from datasets.traj import generate_interpolated_path
+from dataclasses import dataclass, field
 from torch import Tensor
 from torch.utils.tensorboard import SummaryWriter
 from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
+
+from datasets.colmap import Dataset
+from datasets.colmap_dataparser import ColmapParser
+from datasets.traj import generate_interpolated_path
+from gsplat import quat_scale_to_covar_preci
+from gsplat.relocation import compute_relocation
+from gsplat.rendering import rasterization
+from pose_viewer import PoseViewer
+from simple_trainer import create_splats_with_optimizers
 from utils import (
     AppearanceOptModule,
     CameraOptModule,
     set_random_seed,
 )
-from gsplat import quat_scale_to_covar_preci
-from gsplat.rendering import rasterization
-from gsplat.relocation import compute_relocation
-from gsplat.cuda_legacy._torch_impl import scale_rot_to_cov3d
-from simple_trainer import create_splats_with_optimizers
 
 
 @dataclass
@@ -43,6 +44,8 @@ class Config:
     data_dir: str = "data/360_v2/garden"
     # Downsample factor for the dataset
     data_factor: int = 4
+    # How much to scale the camera origins by
+    scale_factor: float = 1.0
     # Directory to save results
     result_dir: str = "results/garden"
     # Every N images there is a test image
@@ -179,11 +182,10 @@ class Runner:
         self.writer = SummaryWriter(log_dir=f"{cfg.result_dir}/tb")
 
         # Load data: Training data should contain initial points and colors.
-        self.parser = Parser(
+        self.parser = ColmapParser(
             data_dir=cfg.data_dir,
             factor=cfg.data_factor,
-            normalize=True,
-            test_every=cfg.test_every,
+            scale_factor=cfg.scale_factor
         )
         self.trainset = Dataset(
             self.parser,
@@ -259,23 +261,19 @@ class Runner:
         # Viewer
         if not self.cfg.disable_viewer:
             self.server = viser.ViserServer(port=cfg.port, verbose=False)
-            # self.viewer = nerfview.Viewer(
-            #     server=self.server,
-            #     render_fn=self._viewer_render_fn,
-            #     mode="training",
-            # )
-            self.viewer = PoseViewer(server=self.server,
+            self.viewer = PoseViewer(
+                server=self.server,
                 render_fn=self._viewer_render_fn,
                 mode="training",
             )
 
     def rasterize_splats(
-        self,
-        camtoworlds: Tensor,
-        Ks: Tensor,
-        width: int,
-        height: int,
-        **kwargs,
+            self,
+            camtoworlds: Tensor,
+            Ks: Tensor,
+            width: int,
+            height: int,
+            **kwargs,
     ) -> Tuple[Tensor, Tensor, Dict]:
         means = self.splats["means3d"]  # [N, 3]
         # quats = F.normalize(self.splats["quats"], dim=-1)  # [N, 4]
@@ -373,7 +371,7 @@ class Runner:
             Ks = data["K"].to(device)  # [1, 3, 3]
             pixels = data["image"].to(device) / 255.0  # [1, H, W, 3]
             num_train_rays_per_step = (
-                pixels.shape[0] * pixels.shape[1] * pixels.shape[2]
+                    pixels.shape[0] * pixels.shape[1] * pixels.shape[2]
             )
             image_ids = data["image_id"].to(device)
             if cfg.depth_loss:
@@ -441,13 +439,13 @@ class Runner:
                 loss += depthloss * cfg.depth_lambda
 
             loss = (
-                loss
-                + cfg.opacity_reg
-                * torch.abs(torch.sigmoid(self.splats["opacities"])).mean()
+                    loss
+                    + cfg.opacity_reg
+                    * torch.abs(torch.sigmoid(self.splats["opacities"])).mean()
             )
             loss = (
-                loss
-                + cfg.scale_reg * torch.abs(torch.exp(self.splats["scales"])).mean()
+                    loss
+                    + cfg.scale_reg * torch.abs(torch.exp(self.splats["scales"])).mean()
             )
 
             loss.backward()
@@ -462,7 +460,7 @@ class Runner:
             pbar.set_description(desc)
 
             if cfg.tb_every > 0 and step % cfg.tb_every == 0:
-                mem = torch.cuda.max_memory_allocated() / 1024**3
+                mem = torch.cuda.max_memory_allocated() / 1024 ** 3
                 self.writer.add_scalar("train/loss", loss.item(), step)
                 self.writer.add_scalar("train/l1loss", l1loss.item(), step)
                 self.writer.add_scalar("train/ssimloss", ssimloss.item(), step)
@@ -523,7 +521,7 @@ class Runner:
 
             # save checkpoint
             if step in [i - 1 for i in cfg.save_steps] or step == max_steps - 1:
-                mem = torch.cuda.max_memory_allocated() / 1024**3
+                mem = torch.cuda.max_memory_allocated() / 1024 ** 3
                 stats = {
                     "mem": mem,
                     "ellipse_time": time.time() - global_tic,
@@ -549,7 +547,7 @@ class Runner:
                 self.viewer.lock.release()
                 num_train_steps_per_sec = 1.0 / (time.time() - tic)
                 num_train_rays_per_sec = (
-                    num_train_rays_per_step * num_train_steps_per_sec
+                        num_train_rays_per_step * num_train_steps_per_sec
                 )
                 # Update the viewer state.
                 self.viewer.state.num_train_rays_per_sec = num_train_rays_per_sec
@@ -660,10 +658,10 @@ class Runner:
             return 1 / (1 + torch.exp(-k * (x - x0)))
 
         noise = (
-            torch.randn_like(self.splats["means3d"])
-            * (op_sigmoid(1 - opacities)).unsqueeze(-1)
-            * cfg.noise_lr
-            * last_lr
+                torch.randn_like(self.splats["means3d"])
+                * (op_sigmoid(1 - opacities)).unsqueeze(-1)
+                * cfg.noise_lr
+                * last_lr
         )
         noise = torch.bmm(actual_covariance, noise.unsqueeze(-1)).squeeze(-1)
         self.splats["means3d"].add_(noise)
@@ -762,7 +760,7 @@ class Runner:
         canvas_all = []
         for i in tqdm.trange(len(camtoworlds), desc="Rendering trajectory"):
             renders, _, _ = self.rasterize_splats(
-                camtoworlds=camtoworlds[i : i + 1],
+                camtoworlds=camtoworlds[i: i + 1],
                 Ks=K[None],
                 width=width,
                 height=height,
@@ -793,7 +791,7 @@ class Runner:
 
     @torch.no_grad()
     def _viewer_render_fn(
-        self, camera_state: nerfview.CameraState, img_wh: Tuple[int, int]
+            self, camera_state: nerfview.CameraState, img_wh: Tuple[int, int]
     ):
         """Callable function for the viewer."""
         W, H = img_wh

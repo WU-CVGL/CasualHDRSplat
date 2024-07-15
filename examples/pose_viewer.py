@@ -1,23 +1,21 @@
 from typing import Dict, Literal
 
-import time
-import torch
 import numpy as np
-
+import torch
 import viser
 import viser.transforms as vtf
-from datasets.colmap import Dataset
 from nerfview.viewer import Viewer
 
-from nerfview._renderer import RenderTask
+from datasets.colmap import Dataset
 
 # not used for now
 VISER_NERFSTUDIO_SCALE_RATIO: float = 10.0
 
+
 class PoseViewer(Viewer):
 
-    def init_scene(self, 
-                   train_dataset: Dataset, 
+    def init_scene(self,
+                   train_dataset: Dataset,
                    train_state: Literal["training", "paused", "completed"]) -> None:
         self.camera_handles: Dict[int, viser.CameraFrustumHandle] = {}
         self.original_c2w: Dict[int, np.ndarray] = {}
@@ -45,16 +43,17 @@ class PoseViewer(Viewer):
 
             K = train_dataset[idx]["K"].cpu().numpy()
             fx = K[0, 0]
-            cx = K[0 ,-1]
+            cx = K[0, -1]
             cy = K[1, -1]
             camera_handle = self.server.add_camera_frustum(
                 name=f"/cameras/camera_{idx:05d}",
                 fov=float(2 * np.arctan(cx / fx)),
-                scale=0.05, # hardcode this scale for now
+                scale=0.05,  # hardcode this scale for now
                 aspect=float(cx / cy),
                 image=image_uint8,
                 wxyz=R.wxyz,
-                position=c2w[:3, 3], # NOTE: not multiplied by VISER_NERFSTUDIO_SCALE_RATIO, this should also be used in get_camera_state
+                position=c2w[:3, 3],
+                # NOTE: not multiplied by VISER_NERFSTUDIO_SCALE_RATIO, this should also be used in get_camera_state
             )
 
             @camera_handle.on_click
@@ -62,13 +61,13 @@ class PoseViewer(Viewer):
                 with event.client.atomic():
                     event.client.camera.position = event.target.position
                     event.client.camera.wxyz = event.target.wxyz
-            
+
             self.camera_handles[idx] = camera_handle
             self.original_c2w[idx] = c2w
 
         self.state.status = train_state
         # self.train_util = 0.9
-    
+
     def update_camera_poses(self, camtoworlds):
         assert self.camera_handles is not None
         # TODO: update poses of camera
@@ -77,9 +76,8 @@ class PoseViewer(Viewer):
 
         with torch.no_grad():
             c2ws = camtoworlds
-        
-        for i, key in enumerate(idxs):
 
+        for i, key in enumerate(idxs):
             c2w = c2ws[i].detach().cpu().numpy()
 
             R = vtf.SO3.from_matrix(c2w[:3, :3])  # type: ignore

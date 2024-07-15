@@ -2,23 +2,27 @@ import json
 import math
 import os
 import time
-from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 import imageio
+import nerfview
 import numpy as np
 import torch
 import torch.nn.functional as F
 import tqdm
 import tyro
 import viser
-import nerfview
-from datasets.colmap import Dataset, Parser
-from datasets.traj import generate_interpolated_path
+from dataclasses import dataclass, field
 from torch import Tensor
 from torch.utils.tensorboard import SummaryWriter
 from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
+
+from datasets.colmap import Dataset
+from datasets.colmap_dataparser import ColmapParser
+from datasets.traj import generate_interpolated_path
+from gsplat.rendering import rasterization
+from pose_viewer import PoseViewer
 from utils import (
     AppearanceOptModule,
     CameraOptModule,
@@ -27,8 +31,6 @@ from utils import (
     rgb_to_sh,
     set_random_seed,
 )
-
-from gsplat.rendering import rasterization
 
 
 @dataclass
@@ -42,6 +44,8 @@ class Config:
     data_dir: str = "data/360_v2/garden"
     # Downsample factor for the dataset
     data_factor: int = 4
+    # How much to scale the camera origins by
+    scale_factor: float = 1.0
     # Directory to save results
     result_dir: str = "results/garden"
     # Every N images there is a test image
@@ -158,18 +162,18 @@ class Config:
 
 
 def create_splats_with_optimizers(
-    parser: Parser,
-    init_type: str = "sfm",
-    init_num_pts: int = 100_000,
-    init_extent: float = 3.0,
-    init_opacity: float = 0.1,
-    init_scale: float = 1.0,
-    scene_scale: float = 1.0,
-    sh_degree: int = 3,
-    sparse_grad: bool = False,
-    batch_size: int = 1,
-    feature_dim: Optional[int] = None,
-    device: str = "cuda",
+        parser: ColmapParser,
+        init_type: str = "sfm",
+        init_num_pts: int = 100_000,
+        init_extent: float = 3.0,
+        init_opacity: float = 0.1,
+        init_scale: float = 1.0,
+        scene_scale: float = 1.0,
+        sh_degree: int = 3,
+        sparse_grad: bool = False,
+        batch_size: int = 1,
+        feature_dim: Optional[int] = None,
+        device: str = "cuda",
 ) -> Tuple[torch.nn.ParameterDict, torch.optim.Optimizer]:
     if init_type == "sfm":
         points = torch.from_numpy(parser.points).float()
@@ -249,7 +253,7 @@ class Runner:
         self.writer = SummaryWriter(log_dir=f"{cfg.result_dir}/tb")
 
         # Load data: Training data should contain initial points and colors.
-        self.parser = Parser(
+        self.parser = ColmapParser(
             data_dir=cfg.data_dir,
             factor=cfg.data_factor,
             normalize=True,
@@ -329,7 +333,7 @@ class Runner:
         # Viewer
         if not self.cfg.disable_viewer:
             self.server = viser.ViserServer(port=cfg.port, verbose=False)
-            self.viewer = nerfview.Viewer(
+            self.viewer = PoseViewer(
                 server=self.server,
                 render_fn=self._viewer_render_fn,
                 mode="training",
@@ -343,12 +347,12 @@ class Runner:
         }
 
     def rasterize_splats(
-        self,
-        camtoworlds: Tensor,
-        Ks: Tensor,
-        width: int,
-        height: int,
-        **kwargs,
+            self,
+            camtoworlds: Tensor,
+            Ks: Tensor,
+            width: int,
+            height: int,
+            **kwargs,
     ) -> Tuple[Tensor, Tensor, Dict]:
         means = self.splats["means3d"]  # [N, 3]
         # quats = F.normalize(self.splats["quats"], dim=-1)  # [N, 4]
@@ -424,6 +428,8 @@ class Runner:
         )
         trainloader_iter = iter(trainloader)
 
+        self._init_viewer_state()
+
         # Training loop.
         global_tic = time.time()
         pbar = tqdm.tqdm(range(init_step, max_steps))
@@ -444,7 +450,7 @@ class Runner:
             Ks = data["K"].to(device)  # [1, 3, 3]
             pixels = data["image"].to(device) / 255.0  # [1, H, W, 3]
             num_train_rays_per_step = (
-                pixels.shape[0] * pixels.shape[1] * pixels.shape[2]
+                    pixels.shape[0] * pixels.shape[1] * pixels.shape[2]
             )
             image_ids = data["image_id"].to(device)
             if cfg.depth_loss:
@@ -523,7 +529,7 @@ class Runner:
             pbar.set_description(desc)
 
             if cfg.tb_every > 0 and step % cfg.tb_every == 0:
-                mem = torch.cuda.max_memory_allocated() / 1024**3
+                mem = torch.cuda.max_memory_allocated() / 1024 ** 3
                 self.writer.add_scalar("train/loss", loss.item(), step)
                 self.writer.add_scalar("train/l1loss", l1loss.item(), step)
                 self.writer.add_scalar("train/ssimloss", ssimloss.item(), step)
@@ -551,8 +557,8 @@ class Runner:
                     # grow GSs
                     is_grad_high = grads >= cfg.grow_grad2d
                     is_small = (
-                        torch.exp(self.splats["scales"]).max(dim=-1).values
-                        <= cfg.grow_scale3d * self.scene_scale
+                            torch.exp(self.splats["scales"]).max(dim=-1).values
+                            <= cfg.grow_scale3d * self.scene_scale
                     )
                     is_dupli = is_grad_high & is_small
                     n_dupli = is_dupli.sum().item()
@@ -580,8 +586,8 @@ class Runner:
                         # it's actually not being used due to a bug:
                         # https://github.com/graphdeco-inria/gaussian-splatting/issues/123
                         is_too_big = (
-                            torch.exp(self.splats["scales"]).max(dim=-1).values
-                            > cfg.prune_scale3d * self.scene_scale
+                                torch.exp(self.splats["scales"]).max(dim=-1).values
+                                > cfg.prune_scale3d * self.scene_scale
                         )
                         is_prune = is_prune | is_too_big
                     n_prune = is_prune.sum().item()
@@ -628,7 +634,7 @@ class Runner:
 
             # save checkpoint
             if step in [i - 1 for i in cfg.save_steps] or step == max_steps - 1:
-                mem = torch.cuda.max_memory_allocated() / 1024**3
+                mem = torch.cuda.max_memory_allocated() / 1024 ** 3
                 stats = {
                     "mem": mem,
                     "ellipse_time": time.time() - global_tic,
@@ -654,7 +660,7 @@ class Runner:
                 self.viewer.lock.release()
                 num_train_steps_per_sec = 1.0 / (time.time() - tic)
                 num_train_rays_per_sec = (
-                    num_train_rays_per_step * num_train_steps_per_sec
+                        num_train_rays_per_step * num_train_steps_per_sec
                 )
                 # Update the viewer state.
                 self.viewer.state.num_train_rays_per_sec = num_train_rays_per_sec
@@ -908,7 +914,7 @@ class Runner:
         canvas_all = []
         for i in tqdm.trange(len(camtoworlds), desc="Rendering trajectory"):
             renders, _, _ = self.rasterize_splats(
-                camtoworlds=camtoworlds[i : i + 1],
+                camtoworlds=camtoworlds[i: i + 1],
                 Ks=K[None],
                 width=width,
                 height=height,
@@ -939,7 +945,7 @@ class Runner:
 
     @torch.no_grad()
     def _viewer_render_fn(
-        self, camera_state: nerfview.CameraState, img_wh: Tuple[int, int]
+            self, camera_state: nerfview.CameraState, img_wh: Tuple[int, int]
     ):
         """Callable function for the viewer."""
         W, H = img_wh
@@ -957,6 +963,12 @@ class Runner:
             radius_clip=3.0,  # skip GSs that have small image radius (in pixels)
         )  # [1, H, W, 3]
         return render_colors[0].cpu().numpy()
+
+    def _init_viewer_state(self) -> None:
+        """Initializes viewer scene with given train dataset"""
+        if not cfg.disable_viewer:
+            assert self.viewer and self.trainset
+            self.viewer.init_scene(train_dataset=self.trainset, train_state="training")
 
 
 def main(cfg: Config):
