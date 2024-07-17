@@ -25,6 +25,7 @@ from gsplat.rendering import rasterization
 from pose_viewer import PoseViewer
 from utils import (
     AppearanceOptModule,
+    BadCameraOptModule,
     CameraOptModule,
     knn,
     normalized_quat_to_rotmat,
@@ -41,13 +42,15 @@ class Config:
     ckpt: Optional[str] = None
 
     # Path to the Mip-NeRF 360 dataset
-    data_dir: str = "data/360_v2/garden"
+    # data_dir: str = "data/360_v2/garden"
+    data_dir: str = "/datasets/bad-gaussian/data/bad-nerf-gtK-colmap-nvs/blurtanabata"
     # Downsample factor for the dataset
-    data_factor: int = 4
+    data_factor: int = 1
     # How much to scale the camera origins by
-    scale_factor: float = 1.0
+    scale_factor: float = 0.25
     # Directory to save results
-    result_dir: str = "results/garden"
+    # result_dir: str = "results/garden"
+    result_dir: str = "results/tanabata_vanilla_4e-4"
     # Every N images there is a test image
     test_every: int = 8
     # Random crop size for training  (experimental)
@@ -95,7 +98,7 @@ class Config:
     # GSs with opacity below this value will be pruned
     prune_opa: float = 0.005
     # GSs with image plane gradient above this value will be split/duplicated
-    grow_grad2d: float = 0.0002
+    grow_grad2d: float = 0.0004
     # GSs with scale below this value will be duplicated. Above will be split
     grow_scale3d: float = 0.01
     # GSs with scale above this value will be pruned.
@@ -123,11 +126,11 @@ class Config:
     random_bkgd: bool = False
 
     # Enable camera optimization.
-    pose_opt: bool = False
+    pose_opt: bool = True
     # Learning rate for camera optimization
-    pose_opt_lr: float = 1e-5
+    pose_opt_lr: float = 1e-3
     # Regularization for camera optimization as weight decay
-    pose_opt_reg: float = 1e-6
+    pose_opt_reg: float = 1e-5
     # Add noise to camera extrinsics. This is only to test the camera pose optimization.
     pose_noise: float = 0.0
 
@@ -149,6 +152,14 @@ class Config:
     tb_every: int = 100
     # Save training images to tensorboard
     tb_save_image: bool = False
+
+    # BAD-Gaussians: Number of virtual cameras
+    num_virtual_views: int = 10
+    # BAD-Gaussians: Number of control knots
+    num_control_knots: int = 4
+
+    def __post_init__(self):
+        self.grow_grad2d = self.grow_grad2d / self.num_virtual_views
 
     def adjust_steps(self, factor: float):
         self.eval_steps = [int(i * factor) for i in self.eval_steps]
@@ -289,7 +300,11 @@ class Runner:
 
         self.pose_optimizers = []
         if cfg.pose_opt:
-            self.pose_adjust = CameraOptModule(len(self.trainset)).to(self.device)
+            self.pose_adjust = BadCameraOptModule(
+                len(self.trainset),
+                cfg.num_control_knots,
+                cfg.num_virtual_views
+            ).to(self.device)
             self.pose_adjust.zero_init()
             self.pose_optimizers = [
                 torch.optim.Adam(
@@ -463,7 +478,10 @@ class Runner:
                 camtoworlds = self.pose_perturb(camtoworlds, image_ids)
 
             if cfg.pose_opt:
-                camtoworlds = self.pose_adjust(camtoworlds, image_ids)
+                assert camtoworlds.shape[0] == 1
+                camtoworlds = self.pose_adjust(camtoworlds, image_ids, "uniform")[0, :, ...]
+                num_cur_virt_views = camtoworlds.shape[0]
+                Ks = Ks.tile((num_cur_virt_views, 1, 1))
 
             # sh schedule
             sh_degree_to_use = min(step // cfg.sh_degree_interval, cfg.sh_degree)
@@ -488,6 +506,9 @@ class Runner:
             if cfg.random_bkgd:
                 bkgd = torch.rand(1, 3, device=device)
                 colors = colors + bkgd * (1.0 - alphas)
+
+            # BAD-Gaussians: average the virtual views
+            colors = colors.mean(0)[None]
 
             info["means2d"].retain_grad()  # used for running stats
 
@@ -837,6 +858,10 @@ class Runner:
             Ks = data["K"].to(device)
             pixels = data["image"].to(device) / 255.0
             height, width = pixels.shape[1:3]
+            image_ids = data["image_id"].to(device)
+
+            if cfg.pose_opt:
+                camtoworlds = self.pose_adjust(camtoworlds, image_ids, "mid")
 
             torch.cuda.synchronize()
             tic = time.time()
