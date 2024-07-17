@@ -1,3 +1,6 @@
+import sys
+sys.path.append('/run/determined/workdir/home/gsplat/examples')
+
 from pathlib import Path
 from typing import List, Literal
 
@@ -6,6 +9,7 @@ import os
 import numpy as np
 import datasets.colmap_parsing_utils as colmap_utils
 from datasets.colmap_utils import parse_colmap_camera_params, auto_orient_and_center_poses
+from trajectory_evaluation import plot_trajectories3D, align_umeyama, compute_absolute_error_translation
 
 def _get_rel_paths(path_dir: str) -> List[str]:
     """Recursively get relative paths of files in a directory."""
@@ -54,6 +58,14 @@ class ColmapParser:
         else:
             raise ValueError(f"Could not find cameras.txt or cameras.bin in {colmap_dir}")
 
+        # read in GT poses if exists
+        if (colmap_dir / "images_gt.bin").exists():
+            im_id_to_image_gt = colmap_utils.read_images_binary(colmap_dir / "images_gt.bin")
+        elif (colmap_dir / "images_gt.txt").exists():
+            im_id_to_image_gt = colmap_utils.read_images_text(colmap_dir / "images_gt.txt")
+        else:
+            im_id_to_image_gt = None
+
         cameras = {}
         # Parse cameras
         for cam_id, cam_data in cam_id_to_camera.items():
@@ -66,6 +78,7 @@ class ColmapParser:
         # Extract extrinsic matrices in world-to-camera format.
         # imdata = manager.images
         w2c_mats = []
+        w2c_mats_gt = []
         camera_ids = []
         Ks_dict = dict()
         params_dict = dict()
@@ -73,11 +86,17 @@ class ColmapParser:
         bottom = np.array([0, 0, 0, 1]).reshape(1, 4)
         for im_id in ordered_im_id:
             im = im_id_to_image[im_id]
-            # rot = im.R()
             rot = colmap_utils.qvec2rotmat(im.qvec)
             trans = im.tvec.reshape(3, 1)
             w2c = np.concatenate([np.concatenate([rot, trans], 1), bottom], axis=0)
             w2c_mats.append(w2c)
+
+            if im_id_to_image_gt is not None:
+                im_gt = im_id_to_image_gt[im_id+1] # NOTE: +1 hacks for now
+                rot_gt = colmap_utils.qvec2rotmat(im_gt.qvec)
+                trans_gt = im_gt.tvec.reshape(3, 1)
+                w2c_gt = np.concatenate([np.concatenate([rot_gt, trans_gt], 1), bottom], axis=0)
+                w2c_mats_gt.append(w2c_gt)
 
             # support different camera intrinsics
             camera_id = im.camera_id
@@ -186,6 +205,23 @@ class ColmapParser:
         bottoms = np.repeat(bottom[np.newaxis, :], N, axis=0)
         camtoworlds = np.concatenate((camtoworlds, bottoms), axis=1)
 
+        if im_id_to_image_gt is not None:
+            w2c_mats_gt = np.stack(w2c_mats_gt, axis=0)
+            camtoworlds_gt = np.linalg.inv(w2c_mats_gt)
+            camtoworlds_gt = camtoworlds_gt[inds]
+            camtoworlds_gt, _ = auto_orient_and_center_poses(
+            camtoworlds_gt, 
+            method=orientation_method,
+            center_method=center_method
+            )
+            scale_factor_gt = 1.0
+            if auto_scale_poses:
+                scale_factor_gt /= float(np.max(np.abs(camtoworlds_gt[:, :3, 3]))) 
+            scale_factor_gt *= self.scale_factor
+            camtoworlds_gt[:, :3, 3] *= scale_factor_gt
+            camtoworlds_gt = np.concatenate((camtoworlds_gt, bottoms), axis=1)
+            self.camtoworlds_gt = camtoworlds_gt
+
         # load in 3D points
         if (colmap_dir / "points3D.bin").exists():
             colmap_points = colmap_utils.read_points3D_binary(colmap_dir / "points3D.bin")
@@ -255,4 +291,25 @@ class ColmapParser:
 
 
 if __name__ == "__main__":
-    parser = ColmapParser(data_dir=Path('/run/determined/workdir/home/gsplat/examples/data/sci_nerf/colmap/airplants'))
+    parser = ColmapParser(data_dir=Path('/run/determined/workdir/home/gsplat/examples/data/sci_nerf/colmap/hotdog'))
+    
+    c2ws = parser.camtoworlds
+    c2ws_gt = parser.camtoworlds_gt
+
+    traj1 = c2ws_gt[:, :3, -1]
+    traj2 = c2ws[:, :3, -1]
+
+    # plot them before alignment
+    plot_trajectories3D(traj1, traj2, filename="trajs_before_align.png")
+
+    # align w/ SIM3
+    s, R, t = align_umeyama(traj1, traj2)
+
+    # apply transformation on the data (traj2)
+    traj2_aligned = (s * (R @ traj2.T)).T + t
+
+    # plot them post alignment
+    plot_trajectories3D(traj1, traj2_aligned, filename="trajs_after_align.png")
+
+    e_trans, _ = compute_absolute_error_translation(traj2_aligned, traj1)
+    print(f"ATE for translation vector is {e_trans}")

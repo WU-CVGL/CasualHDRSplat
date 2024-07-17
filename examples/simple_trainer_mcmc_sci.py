@@ -2,36 +2,39 @@ import json
 import math
 import os
 import time
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 import imageio
-import nerfview
 import numpy as np
+import matplotlib.pyplot as plt
 import torch
 import torch.nn.functional as F
+# import torch.distributed as dist
 import tqdm
 import tyro
 import viser
-from dataclasses import dataclass, field
+import nerfview
+from pose_viewer import PoseViewer
+from datasets.colmap_dataparser import ColmapParser
+from datasets.colmap import Dataset, Parser
+from datasets.traj import generate_interpolated_path
 from torch import Tensor
 from torch.utils.tensorboard import SummaryWriter
 from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
-
-from datasets.colmap import Dataset
-from datasets.colmap_dataparser import ColmapParser
-from datasets.traj import generate_interpolated_path
-from gsplat import quat_scale_to_covar_preci
-from gsplat.relocation import compute_relocation
-from gsplat.rendering import rasterization
-from pose_viewer import PoseViewer
-from simple_trainer import create_splats_with_optimizers
 from utils import (
     PoseOptModule,
     AppearanceOptModule,
     CameraOptModule,
     set_random_seed,
 )
+from gsplat import quat_scale_to_covar_preci
+from gsplat.rendering import rasterization
+from gsplat.relocation import compute_relocation
+from gsplat.cuda_legacy._torch_impl import scale_rot_to_cov3d
+from simple_trainer import create_splats_with_optimizers
+from trajectory_evaluation import plot_trajectories2D, align_umeyama, compute_absolute_error_translation, fig_to_array
 
 
 @dataclass
@@ -67,8 +70,9 @@ class Config:
     # Number of training steps
     max_steps: int = 30_000
     # Steps to evaluate the model
-    eval_steps: List[int] = field(
-        default_factory=lambda: [1_000, 3_000, 5_000, 7_000, 10_000, 12_000, 15_000, 17_000, 20_000, 30_000])
+    eval_steps: List[int] = field(default_factory=lambda: [1_000, 2_000, 3_000, 5_000, 7_000, 9_000, 10_000,
+                                                           12_000, 15_000, 17_000, 20_000,
+                                                           23_000, 25_000, 27_000, 30_000])
     # Steps to save the model
     save_steps: List[int] = field(default_factory=lambda: [7_000, 30_000])
 
@@ -355,11 +359,19 @@ class Runner:
         ]
         if cfg.pose_opt:
             # pose optimization has a learning rate schedule
-            schedulers.append(
-                torch.optim.lr_scheduler.ExponentialLR(
-                    self.pose_optimizers[0], gamma=0.01 ** (1.0 / max_steps)
-                )
-            )
+            # schedulers.append(
+            #     torch.optim.lr_scheduler.ExponentialLR(
+            #         self.pose_optimizers[0], gamma=0.01 ** (1.0 / max_steps)
+            #     )
+            # )
+
+            pose_scheduler = torch.optim.lr_scheduler.ChainedScheduler([torch.optim.lr_scheduler.MultiStepLR(self.pose_optimizers[0], milestones=[self.cfg.refine_start_iter//2, self.cfg.refine_start_iter], gamma=0.1),
+                                                     torch.optim.lr_scheduler.ExponentialLR(self.pose_optimizers[0], gamma=0.01 ** (1.0 / (max_steps - self.cfg.refine_start_iter)))])
+            schedulers.append(pose_scheduler)
+
+            # only optimize poses at early stage then solely optimizing gaussians
+            # pose_scheduler = torch.optim.lr_scheduler.MultiStepLR(self.pose_optimizers[0], milestones=[self.cfg.refine_start_iter], gamma=0)
+            # schedulers.append(pose_scheduler)
 
         trainloader = torch.utils.data.DataLoader(
             self.trainset,
@@ -504,12 +516,21 @@ class Runner:
                     "train/num_GS", len(self.splats["means3d"]), step
                 )
                 self.writer.add_scalar("train/mem", mem, step)
+                # monitor pose learning rate
+                self.writer.add_scalar("train/poseLR", pose_scheduler.get_last_lr()[0], step)
+
+                # monitor ATE
+                if cfg.pose_opt:
+                    self.visualize_traj(step)
+
                 if cfg.depth_loss:
                     self.writer.add_scalar("train/depthloss", depthloss.item(), step)
+
                 if cfg.tb_save_image:
                     canvas = torch.cat([pixels, colors], dim=2).detach().cpu().numpy()
                     canvas = canvas.reshape(-1, *canvas.shape[2:])
                     self.writer.add_image("train/render", canvas, step)
+
                 self.writer.flush()
 
             # edit GSs
@@ -704,6 +725,34 @@ class Runner:
         )
         noise = torch.bmm(actual_covariance, noise.unsqueeze(-1)).squeeze(-1)
         self.splats["means3d"].add_(noise)
+
+    @torch.no_grad()
+    def visualize_traj(self, step: int):
+        # get ground truth trajectory (TODO: how to load this properly)
+        camtoworlds_gt = self.parser.camtoworlds_gt
+
+        # get estimated trajectory
+        camtoworlds = self.pose_adjust.get_poses().to(torch.float32).cpu().numpy()
+
+        # align them
+        traj_gt = camtoworlds_gt[:, :3, -1]
+        traj = camtoworlds[:, :3, -1]
+
+        # log their 3D trajectories to writer as an image
+        s, R, t = align_umeyama(traj_gt, traj)
+        traj_aligned = (s * (R @ traj.T)).T + t
+
+        # plot them post alignment
+        fig = plot_trajectories2D(traj_gt, traj_aligned)
+        img_array = fig_to_array(fig)
+        self.writer.add_image('train/trajectories', img_array, step, dataformats='HWC')
+        plt.close(fig)
+
+        # compute ATE log to writer
+        # NOTE: this quantity is fine for now, but needs to be double-checked if reported in paper
+        ate = compute_absolute_error_translation(traj_gt, traj_aligned)
+        self.writer.add_scalar("train/ATE", ate.item(), step)
+
 
     @torch.no_grad()
     def eval(self, step: int):
