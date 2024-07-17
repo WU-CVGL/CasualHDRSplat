@@ -361,11 +361,19 @@ class Runner:
         ]
         if cfg.pose_opt:
             # pose optimization has a learning rate schedule
-            schedulers.append(
-                torch.optim.lr_scheduler.ExponentialLR(
-                    self.pose_optimizers[0], gamma=0.01 ** (1.0 / max_steps)
-                )
-            )
+            # schedulers.append(
+            #     torch.optim.lr_scheduler.ExponentialLR(
+            #         self.pose_optimizers[0], gamma=0.01 ** (1.0 / max_steps)
+            #     )
+            # )
+
+            pose_scheduler = torch.optim.lr_scheduler.ChainedScheduler([torch.optim.lr_scheduler.MultiStepLR(self.pose_optimizers[0], milestones=[self.cfg.refine_start_iter//2, self.cfg.refine_start_iter], gamma=0.1),
+                                                     torch.optim.lr_scheduler.ExponentialLR(self.pose_optimizers[0], gamma=0.01 ** (1.0 / (max_steps - self.cfg.refine_start_iter)))])
+            schedulers.append(pose_scheduler)
+
+            # only optimize poses at early stage then solely optimizing gaussians
+            # pose_scheduler = torch.optim.lr_scheduler.MultiStepLR(self.pose_optimizers[0], milestones=[self.cfg.refine_start_iter], gamma=0)
+            # schedulers.append(pose_scheduler)
 
         trainloader = torch.utils.data.DataLoader(
             self.trainset,
@@ -510,12 +518,21 @@ class Runner:
                     "train/num_GS", len(self.splats["means3d"]), step
                 )
                 self.writer.add_scalar("train/mem", mem, step)
+                # monitor pose learning rate
+                self.writer.add_scalar("train/poseLR", pose_scheduler.get_last_lr()[0], step)
+                
+                # monitor ATE
+                if cfg.pose_opt:
+                    self.visualize_traj(step)
+
                 if cfg.depth_loss:
                     self.writer.add_scalar("train/depthloss", depthloss.item(), step)
+
                 if cfg.tb_save_image:
                     canvas = torch.cat([pixels, colors], dim=2).detach().cpu().numpy()
                     canvas = canvas.reshape(-1, *canvas.shape[2:])
                     self.writer.add_image("train/render", canvas, step)
+
                 self.writer.flush()
 
             # edit GSs
@@ -710,6 +727,23 @@ class Runner:
         )
         noise = torch.bmm(actual_covariance, noise.unsqueeze(-1)).squeeze(-1)
         self.splats["means3d"].add_(noise)
+
+    @torch.no_grad()
+    def visualize_traj(self, step: int):
+        # get ground truth trajectory (TODO: how to load this properly)
+
+
+        # get estimated trajectory
+        camtoworlds_all = self.pose_adjust.get_poses().to(torch.float32)
+
+        # align them
+
+
+        # log their 3D trajectories to writer as an image
+        
+
+        # compute ATE log to writer
+
 
     @torch.no_grad()
     def eval(self, step: int):
