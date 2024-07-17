@@ -292,6 +292,10 @@ class Dataset:
             "image_id": item,  # the index of the image in the dataset
         }
 
+        if hasattr(self.parser, "camtoworlds_gt"):
+            camtoworlds_gt = self.parser.camtoworlds_gt[index]
+            data["camtoworld_gt"] = torch.from_numpy(camtoworlds_gt).float()
+
         if hasattr(self.parser, 'mask_paths'):
             pil_mask = Image.open(self.parser.mask_paths[index])
             mask_tensor = torch.from_numpy(np.array(pil_mask)).unsqueeze(-1).bool()
