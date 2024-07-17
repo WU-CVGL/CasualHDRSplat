@@ -125,3 +125,5 @@ data
 results
 
 examples/*.png
+
+*.png
