@@ -7,6 +7,7 @@ from typing import Dict, List, Optional, Tuple
 
 import imageio
 import numpy as np
+import matplotlib.pyplot as plt
 import torch
 import torch.nn.functional as F
 # import torch.distributed as dist
@@ -33,6 +34,7 @@ from gsplat.rendering import rasterization
 from gsplat.relocation import compute_relocation
 from gsplat.cuda_legacy._torch_impl import scale_rot_to_cov3d
 from simple_trainer import create_splats_with_optimizers
+from trajectory_evaluation import plot_trajectories2D, align_umeyama, compute_absolute_error_translation, fig_to_array
 
 
 @dataclass
@@ -68,7 +70,9 @@ class Config:
     # Number of training steps
     max_steps: int = 30_000
     # Steps to evaluate the model
-    eval_steps: List[int] = field(default_factory=lambda: [1_000, 3_000, 5_000, 7_000, 10_000, 12_000, 15_000, 17_000, 20_000, 30_000])
+    eval_steps: List[int] = field(default_factory=lambda: [1_000, 2_000, 3_000, 5_000, 7_000, 9_000, 10_000,
+                                                           12_000, 15_000, 17_000, 20_000,
+                                                           23_000, 25_000, 27_000, 30_000])
     # Steps to save the model
     save_steps: List[int] = field(default_factory=lambda: [7_000, 30_000])
 
@@ -731,18 +735,29 @@ class Runner:
     @torch.no_grad()
     def visualize_traj(self, step: int):
         # get ground truth trajectory (TODO: how to load this properly)
-
+        camtoworlds_gt = self.parser.camtoworlds_gt
 
         # get estimated trajectory
-        camtoworlds_all = self.pose_adjust.get_poses().to(torch.float32)
+        camtoworlds = self.pose_adjust.get_poses().to(torch.float32).cpu().numpy()
 
         # align them
-
+        traj_gt = camtoworlds_gt[:, :3, -1]
+        traj = camtoworlds[:, :3, -1]
 
         # log their 3D trajectories to writer as an image
+        s, R, t = align_umeyama(traj_gt, traj)
+        traj_aligned = (s * (R @ traj.T)).T + t
         
+        # plot them post alignment
+        fig = plot_trajectories2D(traj_gt, traj_aligned)
+        img_array = fig_to_array(fig)
+        self.writer.add_image('train/trajectories', img_array, step, dataformats='HWC')
+        plt.close(fig)
 
         # compute ATE log to writer
+        # NOTE: this quantity is fine for now, but needs to be double-checked if reported in paper
+        ate = compute_absolute_error_translation(traj_gt, traj_aligned)
+        self.writer.add_scalar("train/ATE", ate.item(), step)
 
 
     @torch.no_grad()
