@@ -35,7 +35,7 @@ from gsplat.relocation import compute_relocation
 from gsplat.cuda_legacy._torch_impl import scale_rot_to_cov3d
 from simple_trainer import create_splats_with_optimizers
 from trajectory_evaluation import plot_trajectories2D, align_umeyama, compute_absolute_error_translation, fig_to_array
-
+import pypose as pp
 
 @dataclass
 class Config:
@@ -126,6 +126,8 @@ class Config:
     # Use random background for training to discourage transparency
     random_bkgd: bool = False
 
+    # Whether to refine upon GT poses
+    pose_refine: bool = False
     # Enable camera optimization.
     pose_opt: bool = False
     # Learning rate for camera optimization
@@ -246,7 +248,7 @@ class Runner:
             #     )
             # ]
 
-            self.pose_adjust = PoseOptModule(self.parser.camtoworlds, cfg.bezier_degree, cfg.initial_noise).to(self.device)
+            self.pose_adjust = PoseOptModule(self.parser.camtoworlds, cfg.bezier_degree, cfg.initial_noise, cfg.pose_refine, cfg.pose_noise).to(self.device)
             self.pose_optimizers = [
                 torch.optim.Adam(
                     self.pose_adjust.parameters(),
@@ -255,9 +257,9 @@ class Runner:
                 )
             ]
 
-        if cfg.pose_noise > 0.0:
-            self.pose_perturb = CameraOptModule(len(self.trainset)).to(self.device)
-            self.pose_perturb.random_init(cfg.pose_noise)
+        # if cfg.pose_noise > 0.0:
+            # self.pose_perturb = CameraOptModule(len(self.trainset)).to(self.device)
+            # self.pose_perturb.random_init(cfg.pose_noise)
 
         self.app_optimizers = []
         if cfg.app_opt:
@@ -364,21 +366,21 @@ class Runner:
             ),
         ]
         if cfg.pose_opt:
-            # pose optimization has a learning rate schedule
-            # schedulers.append(
-            #     torch.optim.lr_scheduler.ExponentialLR(
-            #         self.pose_optimizers[0], gamma=0.01 ** (1.0 / max_steps)
-            #     )
-            # )
-
-            pose_scheduler = torch.optim.lr_scheduler.ChainedScheduler([torch.optim.lr_scheduler.MultiStepLR(self.pose_optimizers[0], milestones=[self.cfg.refine_start_iter//2, self.cfg.refine_start_iter], gamma=0.1),
-                                                     torch.optim.lr_scheduler.ExponentialLR(self.pose_optimizers[0], gamma=0.01 ** (1.0 / (max_steps - self.cfg.refine_start_iter)))])
-            schedulers.append(pose_scheduler)
+            if cfg.pose_refine:
+                # pose optimization has a learning rate schedule
+                pose_scheduler = torch.optim.lr_scheduler.ExponentialLR(
+                        self.pose_optimizers[0], gamma=0.01 ** (1.0 / max_steps))
+                schedulers.append(pose_scheduler)
+            else:
+                pose_scheduler = torch.optim.lr_scheduler.ChainedScheduler([torch.optim.lr_scheduler.MultiStepLR(self.pose_optimizers[0], milestones=[self.cfg.refine_start_iter//2, self.cfg.refine_start_iter], gamma=0.1),
+                                                        torch.optim.lr_scheduler.ExponentialLR(self.pose_optimizers[0], gamma=0.01 ** (1.0 / (max_steps - self.cfg.refine_start_iter)))])
+                schedulers.append(pose_scheduler)
 
             # only optimize poses at early stage then solely optimizing gaussians
             # pose_scheduler = torch.optim.lr_scheduler.MultiStepLR(self.pose_optimizers[0], milestones=[self.cfg.refine_start_iter], gamma=0)
             # schedulers.append(pose_scheduler)
-
+                
+            
         trainloader = torch.utils.data.DataLoader(
             self.trainset,
             batch_size=self.num_imgs,
@@ -424,8 +426,8 @@ class Runner:
 
                 height, width = pixels.shape[1:3]
 
-                if cfg.pose_noise:
-                    camtoworlds = self.pose_perturb(camtoworlds, image_ids)
+                # if cfg.pose_noise:
+                #     camtoworlds = self.pose_perturb(camtoworlds, image_ids)
 
                 if cfg.pose_opt:
                     camtoworlds = self.pose_adjust.get_poses().to(torch.float32)
@@ -454,7 +456,7 @@ class Runner:
                     bkgd = torch.rand(1, 3, device=device)
                     colors = colors + bkgd * (1.0 - alphas)
 
-                info["means2d"].retain_grad()  # used for running stats
+                # info["means2d"].retain_grad()  # used for running stats
 
                 if "mask" in data:
                     mask = data["mask"].to(device)
