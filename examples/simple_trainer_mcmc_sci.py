@@ -136,6 +136,8 @@ class Config:
     pose_opt_reg: float = 1e-6
     # Add noise to camera extrinsics. This is only to test the camera pose optimization.
     pose_noise: float = 0.0
+    # different trajectory representations
+    traj_mode: str = 'bezier'
     # degree of Bezier curve
     bezier_degree: int = 8
     # initial noise for pose
@@ -248,7 +250,7 @@ class Runner:
             #     )
             # ]
 
-            self.pose_adjust = PoseOptModule(self.parser.camtoworlds, cfg.bezier_degree, cfg.initial_noise, cfg.pose_refine, cfg.pose_noise).to(self.device)
+            self.pose_adjust = PoseOptModule(self.parser.camtoworlds, cfg.traj_mode, cfg.bezier_degree, cfg.initial_noise, cfg.pose_refine, cfg.pose_noise).to(self.device)
             self.pose_optimizers = [
                 torch.optim.Adam(
                     self.pose_adjust.parameters(),
@@ -372,8 +374,10 @@ class Runner:
                         self.pose_optimizers[0], gamma=0.01 ** (1.0 / max_steps))
                 schedulers.append(pose_scheduler)
             else:
-                pose_scheduler = torch.optim.lr_scheduler.ChainedScheduler([torch.optim.lr_scheduler.MultiStepLR(self.pose_optimizers[0], milestones=[self.cfg.refine_start_iter//2, self.cfg.refine_start_iter], gamma=0.1),
-                                                        torch.optim.lr_scheduler.ExponentialLR(self.pose_optimizers[0], gamma=0.01 ** (1.0 / (max_steps - self.cfg.refine_start_iter)))])
+                # pose_scheduler = torch.optim.lr_scheduler.ChainedScheduler([torch.optim.lr_scheduler.MultiStepLR(self.pose_optimizers[0], milestones=[self.cfg.refine_start_iter//2, self.cfg.refine_start_iter], gamma=0.1),
+                #                                         torch.optim.lr_scheduler.ExponentialLR(self.pose_optimizers[0], gamma=0.01 ** (1.0 / (max_steps - self.cfg.refine_start_iter)))])
+                pose_scheduler = torch.optim.lr_scheduler.ExponentialLR(
+                        self.pose_optimizers[0], gamma=0.05 ** (1.0 / max_steps))
                 schedulers.append(pose_scheduler)
 
             # only optimize poses at early stage then solely optimizing gaussians
