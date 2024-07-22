@@ -13,16 +13,15 @@ import tqdm
 import tyro
 import viser
 from dataclasses import dataclass, field
-from torch import Tensor
-from torch.utils.tensorboard import SummaryWriter
-from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
-from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
-
 from datasets.colmap import Dataset
 from datasets.colmap_dataparser import ColmapParser
 from datasets.traj import generate_interpolated_path
 from gsplat.rendering import rasterization
 from pose_viewer import PoseViewer
+from torch import Tensor
+from torch.utils.tensorboard import SummaryWriter
+from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
+from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 from utils import (
     AppearanceOptModule,
     BadCameraOptModule,
@@ -50,7 +49,7 @@ class Config:
     scale_factor: float = 0.25
     # Directory to save results
     # result_dir: str = "results/garden"
-    result_dir: str = "results/tanabata_vanilla_4e-4"
+    result_dir: str = "results/tanabata_vanilla_4e-4_lr1e-3_1e-6_sf0.25_scale-reg_grad25"
     # Every N images there is a test image
     test_every: int = 8
     # Random crop size for training  (experimental)
@@ -98,7 +97,7 @@ class Config:
     # GSs with opacity below this value will be pruned
     prune_opa: float = 0.005
     # GSs with image plane gradient above this value will be split/duplicated
-    grow_grad2d: float = 0.0004
+    grow_grad2d: float = 4e-4
     # GSs with scale below this value will be duplicated. Above will be split
     grow_scale3d: float = 0.01
     # GSs with scale above this value will be pruned.
@@ -130,9 +129,13 @@ class Config:
     # Learning rate for camera optimization
     pose_opt_lr: float = 1e-3
     # Regularization for camera optimization as weight decay
-    pose_opt_reg: float = 1e-5
+    pose_opt_reg: float = 1e-6
+    # Learning rate decay rate of camera optimization
+    pose_opt_lr_decay: float = 1e-3
     # Add noise to camera extrinsics. This is only to test the camera pose optimization.
     pose_noise: float = 0.0
+    # Pose gradient accumulation steps
+    pose_gradient_accumulation_steps: int = 25
 
     # Enable appearance optimization. (experimental)
     app_opt: bool = False
@@ -156,7 +159,12 @@ class Config:
     # BAD-Gaussians: Number of virtual cameras
     num_virtual_views: int = 10
     # BAD-Gaussians: Number of control knots
-    num_control_knots: int = 4
+    num_control_knots: int = 2
+
+    # If enabled, a scale regularization introduced in PhysGauss (https://xpandora.github.io/PhysGaussian/) is used for reducing huge spikey gaussians.
+    use_scale_regularization: bool = True
+    # threshold of ratio of gaussian max to min scale before applying regularization loss from the PhysGaussian paper
+    max_gauss_ratio: float = 10.0
 
     def __post_init__(self):
         self.grow_grad2d = self.grow_grad2d / self.num_virtual_views
@@ -427,11 +435,11 @@ class Runner:
         ]
         if cfg.pose_opt:
             # pose optimization has a learning rate schedule
-            schedulers.append(
-                torch.optim.lr_scheduler.ExponentialLR(
-                    self.pose_optimizers[0], gamma=0.01 ** (1.0 / max_steps)
-                )
+            pose_scheduler = torch.optim.lr_scheduler.ExponentialLR(
+                self.pose_optimizers[0],
+                gamma=pose_opt_lr_decay ** (1.0 / max_steps)
             )
+            schedulers.append(pose_scheduler)
 
         trainloader = torch.utils.data.DataLoader(
             self.trainset,
@@ -538,6 +546,20 @@ class Runner:
                 depthloss = F.l1_loss(disp, disp_gt) * self.scene_scale
                 loss += depthloss * cfg.depth_lambda
 
+            if cfg.use_scale_regularization and step % 10 == 0:
+                scale_exp = torch.exp(self.splats["scales"])
+                scale_reg = (
+                        torch.maximum(
+                            scale_exp.amax(dim=-1) / scale_exp.amin(dim=-1),
+                            torch.tensor(cfg.max_gauss_ratio),
+                        )
+                        - cfg.max_gauss_ratio
+                )
+                scale_reg = 0.1 * scale_reg.mean()
+                loss += scale_reg
+            else:
+                scale_reg = torch.tensor(0.0).to(self.device)
+
             loss.backward()
 
             desc = f"loss={loss.item():.3f}| " f"sh degree={sh_degree_to_use}| "
@@ -558,12 +580,25 @@ class Runner:
                     "train/num_GS", len(self.splats["means3d"]), step
                 )
                 self.writer.add_scalar("train/mem", mem, step)
+                # monitor pose learning rate
+                self.writer.add_scalar("train/poseLR", pose_scheduler.get_last_lr()[0], step)
+
+                # monitor ATE
+                if cfg.pose_opt:
+                    self.writer.add_scalar("train/camera_opt_translation", self.pose_adjust.embeds.weight[:, :3].mean(),
+                                           step)
+                    self.writer.add_scalar("train/camera_opt_rotation", self.pose_adjust.embeds.weight[:, 3:].mean(),
+                                           step)
+                #     self.visualize_traj(step)
+
                 if cfg.depth_loss:
                     self.writer.add_scalar("train/depthloss", depthloss.item(), step)
+
                 if cfg.tb_save_image:
                     canvas = torch.cat([pixels, colors], dim=2).detach().cpu().numpy()
                     canvas = canvas.reshape(-1, *canvas.shape[2:])
                     self.writer.add_image("train/render", canvas, step)
+
                 self.writer.flush()
 
             # update running stats for prunning & growing
@@ -645,8 +680,10 @@ class Runner:
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
             for optimizer in self.pose_optimizers:
-                optimizer.step()
-                optimizer.zero_grad(set_to_none=True)
+                if step % cfg.pose_gradient_accumulation_steps == cfg.pose_gradient_accumulation_steps - 1:
+                    optimizer.step()
+                if step % cfg.pose_gradient_accumulation_steps == 0:
+                    optimizer.zero_grad(set_to_none=True)
             for optimizer in self.app_optimizers:
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)

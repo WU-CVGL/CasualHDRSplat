@@ -25,7 +25,7 @@ from gsplat import quat_scale_to_covar_preci
 from gsplat.relocation import compute_relocation
 from gsplat.rendering import rasterization
 from pose_viewer import PoseViewer
-from simple_trainer import create_splats_with_optimizers
+from simple_trainer import create_splats_with_optimizers, Runner
 from utils import (
     AppearanceOptModule,
     BadCameraOptModule,
@@ -42,13 +42,16 @@ class Config:
     ckpt: Optional[str] = None
 
     # Path to the Mip-NeRF 360 dataset
+    # data_dir: str = "data/360_v2/garden"
     data_dir: str = "/datasets/bad-gaussian/data/bad-nerf-gtK-colmap-nvs/blurtanabata"
     # Downsample factor for the dataset
     data_factor: int = 1
     # How much to scale the camera origins by
-    scale_factor: float = 1.0
+    scale_factor: float = 1
     # Directory to save results
-    result_dir: str = "results/tanabata"
+    # result_dir: str = "results/garden_vanilla"
+    # result_dir: str = "results/tanabata_vanilla"
+    result_dir: str = "results/tanabata_500k_grad25_den2e-4"
     # Every N images there is a test image
     test_every: int = 8
     # Random crop size for training  (experimental)
@@ -67,7 +70,7 @@ class Config:
     # Number of training steps
     max_steps: int = 30_000
     # Steps to evaluate the model
-    eval_steps: List[int] = field(default_factory=lambda: [500, 3_000, 7_000, 10_000, 20_000, 30_000])
+    eval_steps: List[int] = field(default_factory=lambda: [3_000, 7_000, 10_000, 20_000, 30_000])
     # Steps to save the model
     save_steps: List[int] = field(default_factory=lambda: [7_000, 30_000])
 
@@ -81,10 +84,6 @@ class Config:
     sh_degree: int = 3
     # Turn on another SH degree every this steps
     sh_degree_interval: int = 1000
-    # Initial opacity of GS
-    init_opa: float = 0.5
-    # Initial scale of GS
-    init_scale: float = 0.1
     # Weight for SSIM loss
     ssim_lambda: float = 0.2
 
@@ -93,21 +92,53 @@ class Config:
     # Far plane clipping distance
     far_plane: float = 1e10
 
-    # Maximum number of GSs.
-    cap_max: int = 1_000_000
+    ###### MCMC parameters ######
+
+    # whether to use MCMC
+    enable_mcmc: bool = True
+    # MCMC Maximum number of GSs.
+    cap_max: int = 500_000
     # MCMC samping noise learning rate
     noise_lr = 5e5
-    # Opacity regularization
+    # MCMC Opacity regularization
     opacity_reg = 0.01
-    # Scale regularization
+    # MCMC Scale regularization
     scale_reg = 0.01
+    # MCMC Initial opacity of GS
+    init_opa_mcmc: float = 0.5
+    # MCMC Initial scale of GS
+    init_scale_mcmc: float = 0.1
+    # Start refining GSs after this iteration
+    refine_start_iter_mcmc: int = 500
+    # Stop refining GSs after this iteration
+    refine_stop_iter_mcmc: int = 25_000
+    # Refine GSs every this steps
+    refine_every_mcmc: int = 100
 
+    ###### Non-MCMC parameters ######
+
+    # Initial opacity of GS
+    init_opa: float = 0.1
+    # Initial scale of GS
+    init_scale: float = 1.0
+    # GSs with opacity below this value will be pruned
+    prune_opa: float = 0.005
+    # GSs with image plane gradient above this value will be split/duplicated
+    grow_grad2d: float = 2e-4
+    # GSs with scale below this value will be duplicated. Above will be split
+    grow_scale3d: float = 0.01
+    # GSs with scale above this value will be pruned.
+    prune_scale3d: float = 0.1
     # Start refining GSs after this iteration
     refine_start_iter: int = 500
     # Stop refining GSs after this iteration
-    refine_stop_iter: int = 25_000
+    refine_stop_iter: int = 15_000
     # Refine GSs every this steps
     refine_every: int = 100
+    # Reset opacities every this steps
+    reset_every: int = 3000
+
+    ##########################
 
     # Use packed mode for rasterization, this leads to less memory usage but slightly slower.
     packed: bool = False
@@ -127,8 +158,12 @@ class Config:
     pose_opt_lr: float = 1e-3
     # Regularization for camera optimization as weight decay
     pose_opt_reg: float = 1e-5
+    # Learning rate decay rate of camera optimization
+    pose_opt_lr_decay: float = 1e-3
     # Add noise to camera extrinsics. This is only to test the camera pose optimization.
     pose_noise: float = 0.0
+    # Pose gradient accumulation steps
+    pose_gradient_accumulation_steps: int = 25
 
     # Enable appearance optimization. (experimental)
     app_opt: bool = False
@@ -152,7 +187,23 @@ class Config:
     # BAD-Gaussians: Number of virtual cameras
     num_virtual_views: int = 10
     # BAD-Gaussians: Number of control knots
-    num_control_knots: int = 4
+    num_control_knots: int = 2
+
+    # If enabled, a scale regularization introduced in PhysGauss (https://xpandora.github.io/PhysGaussian/) is used for reducing huge spikey gaussians.
+    use_scale_regularization: bool = True
+    # threshold of ratio of gaussian max to min scale before applying regularization loss from the PhysGaussian paper
+    max_gauss_ratio: float = 10.0
+
+    def __post_init__(self):
+        if self.enable_mcmc:
+            print("MCMC enabled.")
+            self.init_opa = self.init_opa_mcmc
+            self.init_scale = self.init_scale_mcmc
+            self.refine_start_iter = self.refine_start_iter_mcmc
+            self.refine_stop_iter = self.refine_stop_iter_mcmc
+            self.refine_every = self.refine_every_mcmc
+        else:
+            self.grow_grad2d = self.grow_grad2d / self.num_virtual_views
 
     def adjust_steps(self, factor: float):
         self.eval_steps = [int(i * factor) for i in self.eval_steps]
@@ -161,10 +212,11 @@ class Config:
         self.sh_degree_interval = int(self.sh_degree_interval * factor)
         self.refine_start_iter = int(self.refine_start_iter * factor)
         self.refine_stop_iter = int(self.refine_stop_iter * factor)
+        self.reset_every = int(self.reset_every * factor)
         self.refine_every = int(self.refine_every * factor)
 
 
-class Runner:
+class DeblurRunner(Runner):
     """Engine for training and testing."""
 
     def __init__(self, cfg: Config) -> None:
@@ -191,6 +243,7 @@ class Runner:
         self.parser = ColmapParser(
             data_dir=cfg.data_dir,
             factor=cfg.data_factor,
+            normalize=True,
             scale_factor=cfg.scale_factor
         )
         self.trainset = Dataset(
@@ -277,6 +330,14 @@ class Runner:
                 mode="training",
             )
 
+        if not cfg.enable_mcmc:
+            # Running stats for prunning & growing.
+            n_gauss = len(self.splats["means3d"])
+            self.running_stats = {
+                "grad2d": torch.zeros(n_gauss, device=self.device),  # norm of the gradient
+                "count": torch.zeros(n_gauss, device=self.device, dtype=torch.int),
+            }
+
     def rasterize_splats(
             self,
             camtoworlds: Tensor,
@@ -343,11 +404,11 @@ class Runner:
         ]
         if cfg.pose_opt:
             # pose optimization has a learning rate schedule
-            schedulers.append(
-                torch.optim.lr_scheduler.ExponentialLR(
-                    self.pose_optimizers[0], gamma=0.01 ** (1.0 / max_steps)
-                )
+            pose_scheduler = torch.optim.lr_scheduler.ExponentialLR(
+                self.pose_optimizers[0],
+                gamma=cfg.pose_opt_lr_decay ** (1.0 / max_steps)
             )
+            schedulers.append(pose_scheduler)
 
         trainloader = torch.utils.data.DataLoader(
             self.trainset,
@@ -420,6 +481,7 @@ class Runner:
                 bkgd = torch.rand(1, 3, device=device)
                 colors = colors + bkgd * (1.0 - alphas)
 
+            # BAD-Gaussians: average the virtual views
             colors = colors.mean(0)[None]
 
             info["means2d"].retain_grad()  # used for running stats
@@ -450,15 +512,30 @@ class Runner:
                 depthloss = F.l1_loss(disp, disp_gt) * self.scene_scale
                 loss += depthloss * cfg.depth_lambda
 
-            loss = (
-                    loss
-                    + cfg.opacity_reg
-                    * torch.abs(torch.sigmoid(self.splats["opacities"])).mean()
-            )
-            loss = (
-                    loss
-                    + cfg.scale_reg * torch.abs(torch.exp(self.splats["scales"])).mean()
-            )
+            if cfg.enable_mcmc:
+                loss = (
+                        loss
+                        + cfg.opacity_reg
+                        * torch.abs(torch.sigmoid(self.splats["opacities"])).mean()
+                )
+                loss = (
+                        loss
+                        + cfg.scale_reg * torch.abs(torch.exp(self.splats["scales"])).mean()
+                )
+
+            if cfg.use_scale_regularization and step % 10 == 0:
+                scale_exp = torch.exp(self.splats["scales"])
+                scale_reg = (
+                        torch.maximum(
+                            scale_exp.amax(dim=-1) / scale_exp.amin(dim=-1),
+                            torch.tensor(cfg.max_gauss_ratio),
+                        )
+                        - cfg.max_gauss_ratio
+                )
+                scale_reg = 0.1 * scale_reg.mean()
+                loss += scale_reg
+            else:
+                scale_reg = torch.tensor(0.0).to(self.device)
 
             loss.backward()
 
@@ -480,8 +557,20 @@ class Runner:
                     "train/num_GS", len(self.splats["means3d"]), step
                 )
                 self.writer.add_scalar("train/mem", mem, step)
+                # monitor pose learning rate
+                self.writer.add_scalar("train/poseLR", pose_scheduler.get_last_lr()[0], step)
+
+                # monitor ATE
+                if cfg.pose_opt:
+                    self.writer.add_scalar("train/camera_opt_translation", self.pose_adjust.embeds.weight[:, :3].mean(),
+                                           step)
+                    self.writer.add_scalar("train/camera_opt_rotation", self.pose_adjust.embeds.weight[:, 3:].mean(),
+                                           step)
+                #     self.visualize_traj(step)
+
                 if cfg.depth_loss:
                     self.writer.add_scalar("train/depthloss", depthloss.item(), step)
+
                 if cfg.tb_save_image:
                     canvas = torch.cat([pixels, colors], dim=2).detach().cpu().numpy()
                     canvas = canvas.reshape(-1, *canvas.shape[2:])
@@ -490,14 +579,72 @@ class Runner:
 
             # edit GSs
             if step < cfg.refine_stop_iter:
-                if step > cfg.refine_start_iter and step % cfg.refine_every == 0:
-                    num_relocated_gs = self.relocate_gs()
-                    print(f"Step {step}: Relocated {num_relocated_gs} GSs.")
+                if cfg.enable_mcmc:
+                    if step > cfg.refine_start_iter and step % cfg.refine_every == 0:
+                        num_relocated_gs = self.relocate_gs()
+                        print(f"Step {step}: Relocated {num_relocated_gs} GSs.")
 
-                    num_new_gs = self.add_new_gs(cfg.cap_max)
-                    print(
-                        f"Step {step}: Added {num_new_gs} GSs. Now having {len(self.splats['means3d'])} GSs."
-                    )
+                        num_new_gs = self.add_new_gs(cfg.cap_max)
+                        print(
+                            f"Step {step}: Added {num_new_gs} GSs. Now having {len(self.splats['means3d'])} GSs."
+                        )
+                else:
+                    self.update_running_stats(info)
+                    if step > cfg.refine_start_iter and step % cfg.refine_every == 0:
+                        grads = self.running_stats["grad2d"] / self.running_stats[
+                            "count"
+                        ].clamp_min(1)
+
+                        # grow GSs
+                        is_grad_high = grads >= cfg.grow_grad2d
+                        is_small = (
+                                torch.exp(self.splats["scales"]).max(dim=-1).values
+                                <= cfg.grow_scale3d * self.scene_scale
+                        )
+                        is_dupli = is_grad_high & is_small
+                        n_dupli = is_dupli.sum().item()
+                        self.refine_duplicate(is_dupli)
+
+                        is_split = is_grad_high & ~is_small
+                        is_split = torch.cat(
+                            [
+                                is_split,
+                                # new GSs added by duplication will not be split
+                                torch.zeros(n_dupli, device=device, dtype=torch.bool),
+                            ]
+                        )
+                        n_split = is_split.sum().item()
+                        self.refine_split(is_split)
+                        print(
+                            f"Step {step}: {n_dupli} GSs duplicated, {n_split} GSs split. "
+                            f"Now having {len(self.splats['means3d'])} GSs."
+                        )
+
+                        # prune GSs
+                        is_prune = torch.sigmoid(self.splats["opacities"]) < cfg.prune_opa
+                        if step > cfg.reset_every:
+                            # The official code also implements sreen-size pruning but
+                            # it's actually not being used due to a bug:
+                            # https://github.com/graphdeco-inria/gaussian-splatting/issues/123
+                            is_too_big = (
+                                    torch.exp(self.splats["scales"]).max(dim=-1).values
+                                    > cfg.prune_scale3d * self.scene_scale
+                            )
+                            is_prune = is_prune | is_too_big
+                        n_prune = is_prune.sum().item()
+                        self.refine_keep(~is_prune)
+                        print(
+                            f"Step {step}: {n_prune} GSs pruned. "
+                            f"Now having {len(self.splats['means3d'])} GSs."
+                        )
+
+                        # reset running stats
+                        self.running_stats["grad2d"].zero_()
+                        self.running_stats["count"].zero_()
+
+                    if step % cfg.reset_every == 0:
+                        self.reset_opa(cfg.prune_opa * 2.0)
+
 
             # Turn Gradients into Sparse Tensor before running optimizer
             if cfg.sparse_grad:
@@ -519,17 +666,20 @@ class Runner:
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
             for optimizer in self.pose_optimizers:
-                optimizer.step()
-                optimizer.zero_grad(set_to_none=True)
+                if step % cfg.pose_gradient_accumulation_steps == cfg.pose_gradient_accumulation_steps - 1:
+                    optimizer.step()
+                if step % cfg.pose_gradient_accumulation_steps == 0:
+                    optimizer.zero_grad(set_to_none=True)
             for optimizer in self.app_optimizers:
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
             for scheduler in schedulers:
                 scheduler.step()
 
-            # add noise to GSs
-            last_lr = schedulers[0].get_last_lr()[0]
-            self.add_noise_to_gs(last_lr)
+            if cfg.enable_mcmc:
+                # add noise to GSs
+                last_lr = schedulers[0].get_last_lr()[0]
+                self.add_noise_to_gs(last_lr)
 
             # save checkpoint
             if step in [i - 1 for i in cfg.save_steps] or step == max_steps - 1:
@@ -834,7 +984,7 @@ class Runner:
 
 
 def main(cfg: Config):
-    runner = Runner(cfg)
+    runner = DeblurRunner(cfg)
 
     if cfg.ckpt is not None:
         # run eval only

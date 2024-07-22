@@ -1,5 +1,6 @@
 import random
 from typing import Literal
+from typing_extensions import assert_never
 
 import numpy as np
 import pypose as pp
@@ -8,7 +9,7 @@ import torch.nn.functional as F
 from sklearn.neighbors import NearestNeighbors
 from torch import Tensor
 
-from spline_function import cubic_bspline_interpolation, bezier_interpolation
+from spline_function import linear_interpolation, linear_interpolation_mid, cubic_bspline_interpolation, bezier_interpolation
 
 TrajSamplingMode = Literal["uniform", "mid"]
 
@@ -19,7 +20,7 @@ class BadCameraOptModule(torch.nn.Module):
     def __init__(self, num_cameras: int, num_control_knots: int, num_virtual_views: int):
         super().__init__()
         self.num_cameras = num_cameras
-        assert num_control_knots == 4, "Only support 4 control knots"
+        assert num_control_knots == 2 or num_control_knots == 4
         self.num_control_knots = num_control_knots
         self.num_virtual_views = num_virtual_views
         self.dof = 6
@@ -52,12 +53,24 @@ class BadCameraOptModule(torch.nn.Module):
 
         if mode == "uniform":
             u = torch.linspace(0, 1, self.num_virtual_views, device=pose_deltas.device)
-            pose_deltas = cubic_bspline_interpolation(pp.se3(pose_deltas).Exp(), u)  # (..., num_virtual_views, 7)
+            if self.num_control_knots == 4:
+                pose_deltas = cubic_bspline_interpolation(pp.se3(pose_deltas).Exp(), u)  # (..., num_virtual_views, 7)
+            elif self.num_control_knots == 2:
+                pose_deltas = linear_interpolation(pp.se3(pose_deltas).Exp(), u)
+            else:
+                assert_never(self.num_control_knots)
             camtoworlds = camtoworlds.unsqueeze(-3)  # (..., 1, 4, 4)
             # returns (..., num_virtual_views, 4, 4)
         elif mode == "mid":
-            pose_deltas = cubic_bspline_interpolation(pp.se3(pose_deltas).Exp(), torch.tensor([0.5])).squeeze(1)
+            if self.num_control_knots == 4:
+                pose_deltas = cubic_bspline_interpolation(pp.se3(pose_deltas).Exp(), torch.tensor([0.5])).squeeze(1)
+            elif self.num_control_knots == 2:
+                pose_deltas = linear_interpolation_mid(pp.se3(pose_deltas).Exp())
+            else:
+                assert_never(self.num_control_knots)
             # returns (..., 4, 4)
+        else:
+            assert_never(mode)
 
         return torch.matmul(camtoworlds, pose_deltas.matrix())
 
