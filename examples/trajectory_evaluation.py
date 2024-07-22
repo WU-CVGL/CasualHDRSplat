@@ -253,10 +253,10 @@ def fig_to_array(fig):
     buf = io.BytesIO()
     fig.savefig(buf, format='png')
     buf.seek(0)
-    img = Image.open(buf)
-    img_array = np.array(img)
+    img_pil = Image.open(buf)
+    img_array = np.array(img_pil)
     buf.close()
-    return img_array
+    return img_pil, img_array
 
 if __name__ == "__main__":
 
