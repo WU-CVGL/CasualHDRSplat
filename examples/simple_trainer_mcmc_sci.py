@@ -5,6 +5,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
+import wandb
 import imageio
 import numpy as np
 import matplotlib.pyplot as plt
@@ -41,6 +42,8 @@ import pypose as pp
 class Config:
     # Disable viewer
     disable_viewer: bool = False
+    # if debug mode disable wandb logging
+    debug: bool = False
     # Path to the .pt file. If provide, it will skip training and render a video
     ckpt: Optional[str] = None
 
@@ -193,7 +196,15 @@ class Runner:
         os.makedirs(self.render_dir, exist_ok=True)
 
         # Tensorboard
-        self.writer = SummaryWriter(log_dir=f"{cfg.result_dir}/tb")
+        # self.writer = SummaryWriter(log_dir=f"{cfg.result_dir}/tb")
+        wandb.init(# Set the project where this run will be logged
+                    project="SCI-gsplat",
+                    name=os.path.normpath(os.path.basename(cfg.result_dir)),
+                    # Track hyperparameters and run metadata
+                    config=cfg,
+                    # dir=f"{cfg.result_dir}/wandb"
+                    mode="disabled" if cfg.debug else "online"
+                    )
 
         # Load data: Training data should contain initial points and colors.
         # self.parser = Parser(
@@ -258,6 +269,8 @@ class Runner:
                     weight_decay=cfg.pose_opt_reg,
                 )
             ]
+            
+            wandb.watch(self.pose_adjust, log_freq=100)
 
         # if cfg.pose_noise > 0.0:
             # self.pose_perturb = CameraOptModule(len(self.trainset)).to(self.device)
@@ -521,29 +534,39 @@ class Runner:
 
             if cfg.tb_every > 0 and step % cfg.tb_every == 0:
                 mem = torch.cuda.max_memory_allocated() / 1024**3
-                self.writer.add_scalar("train/loss", loss.item(), step)
-                self.writer.add_scalar("train/l1loss", l1loss.item(), step)
-                self.writer.add_scalar("train/ssimloss", ssimloss.item(), step)
-                self.writer.add_scalar(
-                    "train/num_GS", len(self.splats["means3d"]), step
-                )
-                self.writer.add_scalar("train/mem", mem, step)
-                # monitor pose learning rate
-                self.writer.add_scalar("train/poseLR", pose_scheduler.get_last_lr()[0], step)
+                # self.writer.add_scalar("train/loss", loss.item(), step)
+                # self.writer.add_scalar("train/l1loss", l1loss.item(), step)
+                # self.writer.add_scalar("train/ssimloss", ssimloss.item(), step)
+                # self.writer.add_scalar(
+                #     "train/num_GS", len(self.splats["means3d"]), step
+                # )
+                # self.writer.add_scalar("train/mem", mem, step)
+                # # monitor pose learning rate
+                # self.writer.add_scalar("train/poseLR", pose_scheduler.get_last_lr()[0], step)
+                
+                # log w/ wandb
+                wandb.log({"train/loss": loss.item()}, step=step)
+                wandb.log({"train/l1loss": l1loss.item()}, step=step)
+                wandb.log({"train/ssimloss": ssimloss.item()}, step=step)
+                wandb.log({"train/num_GS": len(self.splats["means3d"])}, step=step)
+                wandb.log({"train/mem": mem}, step=step)
+                wandb.log({"train/poseLR": pose_scheduler.get_last_lr()[0]}, step=step)
                 
                 # monitor ATE
                 if cfg.pose_opt:
                     self.visualize_traj(step)
 
                 if cfg.depth_loss:
-                    self.writer.add_scalar("train/depthloss", depthloss.item(), step)
+                    # self.writer.add_scalar("train/depthloss", depthloss.item(), step)
+                    wandb.log({"train/depthloss": depthloss.item()}, step=step)
 
                 if cfg.tb_save_image:
                     canvas = torch.cat([pixels, colors], dim=2).detach().cpu().numpy()
                     canvas = canvas.reshape(-1, *canvas.shape[2:])
-                    self.writer.add_image("train/render", canvas, step)
+                    # self.writer.add_image("train/render", canvas, step)
+                    wandb.log({"train/render": canvas}, step=step)
 
-                self.writer.flush()
+                # self.writer.flush()
 
             # edit GSs
             if step < cfg.refine_stop_iter:
@@ -756,14 +779,18 @@ class Runner:
         
         # plot them post alignment
         fig = plot_trajectories2D(traj_gt, traj_aligned)
-        img_array = fig_to_array(fig)
-        self.writer.add_image('train/trajectories', img_array, step, dataformats='HWC')
+        img_pil, img_array = fig_to_array(fig)
+        # self.writer.add_image('train/trajectories', img_array, step, dataformats='HWC')
+        # wandb.log({"train/trajectories": fig}, step=step)
+        wandb.log({"trajectories": wandb.Image(img_pil)}, step=step) # NOTE: cannot have / before media
+        # wandb.log({"train/trajectories": wandb.Image(img_array)})
         plt.close(fig)
 
         # compute ATE log to writer
         # NOTE: this quantity is fine for now, but needs to be double-checked if reported in paper
         ate = compute_absolute_error_translation(traj_gt, traj_aligned)
-        self.writer.add_scalar("train/ATE", ate.item(), step)
+        # self.writer.add_scalar("train/ATE", ate.item(), step)
+        wandb.log({"train/ATE": ate.item()}, step=step)
 
 
     @torch.no_grad()
@@ -842,8 +869,9 @@ class Runner:
             json.dump(stats, f)
         # save stats to tensorboard
         for k, v in stats.items():
-            self.writer.add_scalar(f"val/{k}", v, step)
-        self.writer.flush()
+            # self.writer.add_scalar(f"val/{k}", v, step)
+            wandb.log({f"val/{k}": v}, step=step)
+        # self.writer.flush()
 
     @torch.no_grad()
     def render_traj(self, step: int):
