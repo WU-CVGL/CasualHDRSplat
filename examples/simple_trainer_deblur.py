@@ -20,6 +20,7 @@ from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 
 from datasets.colmap import Dataset
 from datasets.colmap_dataparser import ColmapParser
+from datasets.deblur_nerf import DeblurNerfDataset
 from datasets.traj import generate_interpolated_path
 from gsplat import quat_scale_to_covar_preci
 from gsplat.relocation import compute_relocation
@@ -51,7 +52,7 @@ class Config:
     # Directory to save results
     # result_dir: str = "results/garden_vanilla"
     # result_dir: str = "results/tanabata_vanilla"
-    result_dir: str = "results/tanabata_500k_grad25_den2e-4"
+    result_dir: str = "results/tanabata_500k_grad25_den2e-4_eval"
     # Every N images there is a test image
     test_every: int = 8
     # Random crop size for training  (experimental)
@@ -253,6 +254,7 @@ class DeblurRunner(Runner):
             load_depths=cfg.depth_loss,
         )
         self.valset = Dataset(self.parser, split="val")
+        self.testset = DeblurNerfDataset(self.parser, split="test")
         self.scene_scale = self.parser.scene_scale * 1.1 * cfg.global_scale
         print("Scene scale:", self.scene_scale)
 
@@ -836,7 +838,7 @@ class DeblurRunner(Runner):
         device = self.device
 
         valloader = torch.utils.data.DataLoader(
-            self.valset, batch_size=1, shuffle=False, num_workers=1
+            self.testset, batch_size=1, shuffle=False, num_workers=1
         )
         ellipse_time = 0
         metrics = {"psnr": [], "ssim": [], "lpips": []}
