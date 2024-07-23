@@ -394,8 +394,9 @@ class Runner:
                 # pose_scheduler = torch.optim.lr_scheduler.ChainedScheduler([torch.optim.lr_scheduler.MultiStepLR(self.pose_optimizers[0], milestones=[self.cfg.refine_start_iter//2, self.cfg.refine_start_iter], gamma=0.1),
                 #                                         torch.optim.lr_scheduler.ExponentialLR(self.pose_optimizers[0], gamma=0.01 ** (1.0 / (max_steps - self.cfg.refine_start_iter)))])
                 pose_scheduler = torch.optim.lr_scheduler.ExponentialLR(
-                        self.pose_optimizers[0], gamma=0.05 ** (1.0 / max_steps))
+                        self.pose_optimizers[0], gamma=0.0005 ** (1.0 / max_steps))
                 schedulers.append(pose_scheduler)
+                pass
 
             # only optimize poses at early stage then solely optimizing gaussians
             # pose_scheduler = torch.optim.lr_scheduler.MultiStepLR(self.pose_optimizers[0], milestones=[self.cfg.refine_start_iter], gamma=0)
