@@ -189,6 +189,7 @@ class ColmapParser:
         if os.path.exists(mask_dir):
             mask_paths = [os.path.join(mask_dir, f) for f in image_names]
             self.mask_paths = mask_paths
+            print('Got masks path!')
 
         camtoworlds, transform_matrix = auto_orient_and_center_poses(
             camtoworlds, 
