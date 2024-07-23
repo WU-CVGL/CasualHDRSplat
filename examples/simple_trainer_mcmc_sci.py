@@ -52,13 +52,13 @@ class Config:
     # Path to the Mip-NeRF 360 dataset
     data_dir: str = "data/360_v2/garden"
     # Downsample factor for the dataset
-    data_factor: int = 1 # cannot downsample w/ SCI
+    data_factor: int = 1  # cannot downsample w/ SCI
     # How much to scale the camera origins by
     scale_factor: float = 1.0
     # Directory to save results
     result_dir: str = "results/garden"
     # Every N images there is a test image
-    test_every: int = 8 # not used in our case
+    test_every: int = 8  # not used in our case
     # Random crop size for training  (experimental)
     patch_size: Optional[int] = None
     # A global scaler that applies to the scene size related parameters
@@ -68,7 +68,7 @@ class Config:
     port: int = 8080
 
     # Batch size for training. Learning rates are scaled automatically
-    batch_size: int = 1 
+    batch_size: int = 1
     # A global factor to scale the number of training steps
     steps_scaler: float = 1.0
 
@@ -211,14 +211,13 @@ class Runner:
 
         # Tensorboard
         # self.writer = SummaryWriter(log_dir=f"{cfg.result_dir}/tb")
-        wandb.init(# Set the project where this run will be logged
-                    project="SCI-gsplat",
-                    name=os.path.normpath(os.path.basename(cfg.result_dir)),
-                    # Track hyperparameters and run metadata
-                    config=cfg,
-                    # dir=f"{cfg.result_dir}/wandb"
-                    mode="disabled" if cfg.debug else "online"
-                    )
+        wandb.init(  # Set the project where this run will be logged
+            project="SCI-gsplat",
+            name=os.path.normpath(os.path.basename(cfg.result_dir)),
+            # Track hyperparameters and run metadata
+            config=cfg,
+            # dir=f"{cfg.result_dir}/wandb"
+            mode="disabled" if cfg.debug else "online")
 
         # Load data: Training data should contain initial points and colors.
         # self.parser = Parser(
@@ -228,12 +227,12 @@ class Runner:
         #     test_every=cfg.test_every,
         # )
 
-        self.parser = ColmapParser(data_dir=cfg.data_dir, factor=cfg.data_factor, scale_factor=cfg.scale_factor)
+        self.parser = ColmapParser(data_dir=cfg.data_dir,
+                                   factor=cfg.data_factor,
+                                   scale_factor=cfg.scale_factor)
 
         self.num_imgs = len(self.parser.image_names)
 
-        # TODO: revise dataset to train and test w/ all images
-        # add a flag?
         self.trainset = Dataset(
             self.parser,
             split="all",
@@ -275,7 +274,11 @@ class Runner:
             #     )
             # ]
 
-            self.pose_adjust = PoseOptModule(self.parser.camtoworlds, cfg.traj_mode, cfg.bezier_degree, cfg.initial_noise, cfg.pose_refine, cfg.pose_noise).to(self.device)
+            self.pose_adjust = PoseOptModule(self.parser.camtoworlds,
+                                             cfg.traj_mode, cfg.bezier_degree,
+                                             cfg.initial_noise,
+                                             cfg.pose_refine,
+                                             cfg.pose_noise).to(self.device)
             self.pose_optimizers = [
                 torch.optim.Adam(
                     self.pose_adjust.parameters(),
@@ -285,18 +288,18 @@ class Runner:
                     weight_decay=cfg.pose_opt_reg,
                 )
             ]
-            
+
             wandb.watch(self.pose_adjust, log_freq=100)
 
         # if cfg.pose_noise > 0.0:
-            # self.pose_perturb = CameraOptModule(len(self.trainset)).to(self.device)
-            # self.pose_perturb.random_init(cfg.pose_noise)
+        # self.pose_perturb = CameraOptModule(len(self.trainset)).to(self.device)
+        # self.pose_perturb.random_init(cfg.pose_noise)
 
         self.app_optimizers = []
         if cfg.app_opt:
             self.app_module = AppearanceOptModule(
-                len(self.trainset), feature_dim, cfg.app_embed_dim, cfg.sh_degree
-            ).to(self.device)
+                len(self.trainset), feature_dim, cfg.app_embed_dim,
+                cfg.sh_degree).to(self.device)
             # initialize the last layer to be zero so that the initial output is zero.
             torch.nn.init.zeros_(self.app_module.color_head[-1].weight)
             torch.nn.init.zeros_(self.app_module.color_head[-1].bias)
@@ -313,11 +316,11 @@ class Runner:
             ]
 
         # Losses & Metrics.
-        self.ssim = StructuralSimilarityIndexMeasure(data_range=1.0).to(self.device)
+        self.ssim = StructuralSimilarityIndexMeasure(data_range=1.0).to(
+            self.device)
         self.psnr = PeakSignalNoiseRatio(data_range=1.0).to(self.device)
         self.lpips = LearnedPerceptualImagePatchSimilarity(normalize=True).to(
-            self.device
-        )
+            self.device)
 
         # Viewer
         if not self.cfg.disable_viewer:
@@ -327,7 +330,8 @@ class Runner:
             #     render_fn=self._viewer_render_fn,
             #     mode="training",
             # )
-            self.viewer = PoseViewer(server=self.server,
+            self.viewer = PoseViewer(
+                server=self.server,
                 render_fn=self._viewer_render_fn,
                 mode="training",
             )
@@ -358,7 +362,8 @@ class Runner:
             colors = colors + self.splats["colors"]
             colors = torch.sigmoid(colors)
         else:
-            colors = torch.cat([self.splats["sh0"], self.splats["shN"]], 1)  # [N, K, 3]
+            colors = torch.cat([self.splats["sh0"], self.splats["shN"]],
+                               1)  # [N, K, 3]
 
         rasterize_mode = "antialiased" if self.cfg.antialiased else "classic"
         render_colors, render_alphas, info = rasterization(
@@ -416,7 +421,7 @@ class Runner:
             if cfg.pose_refine:
                 # pose optimization has a learning rate schedule
                 pose_scheduler = torch.optim.lr_scheduler.ExponentialLR(
-                        self.pose_optimizers[0], gamma=0.01 ** (1.0 / max_steps))
+                    self.pose_optimizers[0], gamma=0.01**(1.0 / max_steps))
                 schedulers.append(pose_scheduler)
             else:
                 # pose_scheduler = torch.optim.lr_scheduler.ExponentialLR(
@@ -440,7 +445,6 @@ class Runner:
             persistent_workers=True,
             pin_memory=True,
         )
-        # trainloader_iter = iter(trainloader)
 
         self._init_viewer_state()
 
@@ -454,22 +458,13 @@ class Runner:
                 self.viewer.lock.acquire()
                 tic = time.time()
 
-            # try:
-            #     data = next(trainloader_iter)
-            # except StopIteration:
-            #     trainloader_iter = iter(trainloader)
-            #     data = next(trainloader_iter)
-
-            # trainloader_iter = iter(trainloader)
-            
             for data in trainloader:
-
-                camtoworlds = camtoworlds_gt = data["camtoworld"].to(device)  # [N, 4, 4]
+                camtoworlds = camtoworlds_gt = data["camtoworld"].to(
+                    device)  # [N, 4, 4]
                 Ks = data["K"].to(device)  # [N, 3, 3]
                 pixels = data["image"].to(device) / 255.0  # [N, H, W, 3]
-                num_train_rays_per_step = (
-                    pixels.shape[0] * pixels.shape[1] * pixels.shape[2]
-                )
+                num_train_rays_per_step = (pixels.shape[0] * pixels.shape[1] *
+                                           pixels.shape[2])
                 image_ids = data["image_id"].to(device)
                 if cfg.depth_loss:
                     points = data["points"].to(device)  # [1, M, 2]
@@ -477,14 +472,13 @@ class Runner:
 
                 height, width = pixels.shape[1:3]
 
-                # if cfg.pose_noise:
-                #     camtoworlds = self.pose_perturb(camtoworlds, image_ids)
-
                 if cfg.pose_opt:
-                    camtoworlds = self.pose_adjust.get_poses().to(torch.float32)
+                    camtoworlds = self.pose_adjust.get_poses().to(
+                        torch.float32)
 
                 # sh schedule
-                sh_degree_to_use = min(step // cfg.sh_degree_interval, cfg.sh_degree)
+                sh_degree_to_use = min(step // cfg.sh_degree_interval,
+                                       cfg.sh_degree)
 
                 # forward
                 renders, alphas, info = self.rasterize_splats(
@@ -507,24 +501,23 @@ class Runner:
                     bkgd = torch.rand(1, 3, device=device)
                     colors = colors + bkgd * (1.0 - alphas)
 
-                # info["means2d"].retain_grad()  # used for running stats
-
                 if "mask" in data:
                     mask = data["mask"].to(device)
-                    assert mask.shape[:2] == pixels.shape[:2] == colors.shape[:2]
+                    assert mask.shape[:2] == pixels.shape[:2] == colors.shape[:
+                                                                              2]
                     pixels = pixels * mask
                     colors = colors * mask
-            
+
             comp_gt_img = pixels.sum(0).unsqueeze(0)
             comp_img = colors.sum(0).unsqueeze(0)
 
             # loss
             l1loss = F.l1_loss(comp_img, comp_gt_img)
-            ssimloss = 1.0 - self.ssim(
-                comp_gt_img.permute(0, 3, 1, 2), comp_img.permute(0, 3, 1, 2)
-            )
-            loss = l1loss * (1.0 - cfg.ssim_lambda) + ssimloss * cfg.ssim_lambda
-            
+            ssimloss = 1.0 - self.ssim(comp_gt_img.permute(0, 3, 1, 2),
+                                       comp_img.permute(0, 3, 1, 2))
+            loss = l1loss * (1.0 -
+                             cfg.ssim_lambda) + ssimloss * cfg.ssim_lambda
+
             if cfg.depth_loss:
                 # query depths from depth map
                 points = torch.stack(
@@ -535,25 +528,21 @@ class Runner:
                     dim=-1,
                 )  # normalize to [-1, 1]
                 grid = points.unsqueeze(2)  # [1, M, 1, 2]
-                depths = F.grid_sample(
-                    depths.permute(0, 3, 1, 2), grid, align_corners=True
-                )  # [1, 1, M, 1]
+                depths = F.grid_sample(depths.permute(0, 3, 1, 2),
+                                       grid,
+                                       align_corners=True)  # [1, 1, M, 1]
                 depths = depths.squeeze(3).squeeze(1)  # [1, M]
                 # calculate loss in disparity space
-                disp = torch.where(depths > 0.0, 1.0 / depths, torch.zeros_like(depths))
+                disp = torch.where(depths > 0.0, 1.0 / depths,
+                                   torch.zeros_like(depths))
                 disp_gt = 1.0 / depths_gt  # [1, M]
                 depthloss = F.l1_loss(disp, disp_gt) * self.scene_scale
                 loss += depthloss * cfg.depth_lambda
 
-            loss = (
-                loss
-                + cfg.opacity_reg
-                * torch.abs(torch.sigmoid(self.splats["opacities"])).mean()
-            )
-            loss = (
-                loss
-                + cfg.scale_reg * torch.abs(torch.exp(self.splats["scales"])).mean()
-            )
+            loss = (loss + cfg.opacity_reg *
+                    torch.abs(torch.sigmoid(self.splats["opacities"])).mean())
+            loss = (loss + cfg.scale_reg *
+                    torch.abs(torch.exp(self.splats["scales"])).mean())
 
             loss.backward()
 
@@ -577,17 +566,25 @@ class Runner:
                 # self.writer.add_scalar("train/mem", mem, step)
                 # # monitor pose learning rate
                 # self.writer.add_scalar("train/poseLR", pose_scheduler.get_last_lr()[0], step)
-                
+
                 # log w/ wandb
                 wandb.log({"train/loss": loss.item()}, step=step)
                 wandb.log({"train/l1loss": l1loss.item()}, step=step)
                 wandb.log({"train/ssimloss": ssimloss.item()}, step=step)
-                wandb.log({"train/num_GS": len(self.splats["means3d"])}, step=step)
+                wandb.log({"train/num_GS": len(self.splats["means3d"])},
+                          step=step)
                 wandb.log({"train/mem": mem}, step=step)
-                wandb.log({"learning_rate/means3d": schedulers[0].get_last_lr()[0]}, step=step)
+                wandb.log(
+                    {"learning_rate/means3d": schedulers[0].get_last_lr()[0]},
+                    step=step)
                 if cfg.pose_opt:
-                    wandb.log({"learning_rate/pose": pose_scheduler.get_last_lr()[0]}, step=step)
-                
+                    wandb.log(
+                        {
+                            "learning_rate/pose":
+                            pose_scheduler.get_last_lr()[0]
+                        },
+                        step=step)
+
                 # monitor ATE
                 if cfg.pose_opt:
                     self.visualize_traj(step)
@@ -597,7 +594,8 @@ class Runner:
                     wandb.log({"train/depthloss": depthloss.item()}, step=step)
 
                 if cfg.tb_save_image:
-                    canvas = torch.cat([pixels, colors], dim=2).detach().cpu().numpy()
+                    canvas = torch.cat([pixels, colors],
+                                       dim=2).detach().cpu().numpy()
                     canvas = canvas.reshape(-1, *canvas.shape[2:])
                     # self.writer.add_image("train/render", canvas, step)
                     # NOTE: this does not work well with wandb yet
@@ -635,25 +633,28 @@ class Runner:
             for optimizer in self.optimizers:
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
-                
+
             if cfg.pose_opt:
-                if ((step + 1) % cfg.pose_grad_accum == 0): # omit the last incomplete accumulation round 
+                if ((step + 1) % cfg.pose_grad_accum == 0
+                    ):  # omit the last incomplete accumulation round
                     # scale the gradient of params in pose_adjust
                     for param in self.pose_adjust.parameters():
                         param.grad /= cfg.pose_grad_accum
-                    
+
                     if cfg.pose_grad_clip != 0:
-                        torch.nn.utils.clip_grad_value_(self.pose_adjust.parameters(), clip_value=cfg.pose_grad_clip)
-                    
+                        torch.nn.utils.clip_grad_value_(
+                            self.pose_adjust.parameters(),
+                            clip_value=cfg.pose_grad_clip)
+
                     # optimizing poses (support gradient clipping w/ value, gradient accumulation)
                     for optimizer in self.pose_optimizers:
                         optimizer.step()
                         optimizer.zero_grad(set_to_none=True)
-                
+
             for optimizer in self.app_optimizers:
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
-                
+
             for scheduler in schedulers:
                 scheduler.step()
 
@@ -662,7 +663,8 @@ class Runner:
             self.add_noise_to_gs(last_lr)
 
             # save checkpoint
-            if step in [i - 1 for i in cfg.save_steps] or step == max_steps - 1:
+            if step in [i - 1
+                        for i in cfg.save_steps] or step == max_steps - 1:
                 mem = torch.cuda.max_memory_allocated() / 1024**3
                 stats = {
                     "mem": mem,
@@ -670,7 +672,8 @@ class Runner:
                     "num_GS": len(self.splats["means3d"]),
                 }
                 print("Step: ", step, stats)
-                with open(f"{self.stats_dir}/train_step{step:04d}.json", "w") as f:
+                with open(f"{self.stats_dir}/train_step{step:04d}.json",
+                          "w") as f:
                     json.dump(stats, f)
                 torch.save(
                     {
@@ -681,7 +684,8 @@ class Runner:
                 )
 
             # eval the full set
-            if step in [i - 1 for i in cfg.eval_steps] or step == max_steps - 1:
+            if step in [i - 1
+                        for i in cfg.eval_steps] or step == max_steps - 1:
                 self.eval(step)
                 # self.render_traj(step)
                 self.render_traj_all(step)
@@ -689,9 +693,8 @@ class Runner:
             if not cfg.disable_viewer:
                 self.viewer.lock.release()
                 num_train_steps_per_sec = 1.0 / (time.time() - tic)
-                num_train_rays_per_sec = (
-                    num_train_rays_per_step * num_train_steps_per_sec
-                )
+                num_train_rays_per_sec = (num_train_rays_per_step *
+                                          num_train_steps_per_sec)
                 # Update the viewer state.
                 self.viewer.state.num_train_rays_per_sec = num_train_rays_per_sec
                 # Update the scene.
@@ -719,7 +722,9 @@ class Runner:
             scales=torch.exp(self.splats["scales"])[sampled_idxs],
             ratios=torch.bincount(sampled_idxs)[sampled_idxs] + 1,
         )
-        new_opacities = torch.clamp(new_opacities, max=1.0 - eps, min=min_opacity)
+        new_opacities = torch.clamp(new_opacities,
+                                    max=1.0 - eps,
+                                    min=min_opacity)
         self.splats["opacities"][sampled_idxs] = torch.logit(new_opacities)
         self.splats["scales"][sampled_idxs] = torch.log(new_scales)
 
@@ -760,13 +765,16 @@ class Runner:
             scales=torch.exp(self.splats["scales"])[sampled_idxs],
             ratios=torch.bincount(sampled_idxs)[sampled_idxs] + 1,
         )
-        new_opacities = torch.clamp(new_opacities, max=1.0 - eps, min=min_opacity)
+        new_opacities = torch.clamp(new_opacities,
+                                    max=1.0 - eps,
+                                    min=min_opacity)
         self.splats["opacities"][sampled_idxs] = torch.logit(new_opacities)
         self.splats["scales"][sampled_idxs] = torch.log(new_scales)
 
         # Update splats and optimizers
         for k in self.splats.keys():
-            self.splats[k] = torch.cat([self.splats[k], self.splats[k][sampled_idxs]])
+            self.splats[k] = torch.cat(
+                [self.splats[k], self.splats[k][sampled_idxs]])
         for optimizer in self.optimizers:
             for i, param_group in enumerate(optimizer.param_groups):
                 p = param_group["params"][0]
@@ -776,9 +784,8 @@ class Runner:
                 for key in p_state.keys():
                     if key != "step":
                         v = p_state[key]
-                        v_new = torch.zeros(
-                            (len(sampled_idxs), *v.shape[1:]), device=self.device
-                        )
+                        v_new = torch.zeros((len(sampled_idxs), *v.shape[1:]),
+                                            device=self.device)
                         p_state[key] = torch.cat([v, v_new])
                 p_new = torch.nn.Parameter(self.splats[name])
                 optimizer.param_groups[i]["params"] = [p_new]
@@ -802,12 +809,9 @@ class Runner:
         def op_sigmoid(x, k=100, x0=0.995):
             return 1 / (1 + torch.exp(-k * (x - x0)))
 
-        noise = (
-            torch.randn_like(self.splats["means3d"])
-            * (op_sigmoid(1 - opacities)).unsqueeze(-1)
-            * cfg.noise_lr
-            * last_lr
-        )
+        noise = (torch.randn_like(self.splats["means3d"]) *
+                 (op_sigmoid(1 - opacities)).unsqueeze(-1) * cfg.noise_lr *
+                 last_lr)
         noise = torch.bmm(actual_covariance, noise.unsqueeze(-1)).squeeze(-1)
         self.splats["means3d"].add_(noise)
 
@@ -817,7 +821,8 @@ class Runner:
         camtoworlds_gt = self.parser.camtoworlds_gt
 
         # get estimated trajectory
-        camtoworlds = self.pose_adjust.get_poses().to(torch.float32).cpu().numpy()
+        camtoworlds = self.pose_adjust.get_poses().to(
+            torch.float32).cpu().numpy()
 
         # align them
         traj_gt = camtoworlds_gt[:, :3, -1]
@@ -826,13 +831,14 @@ class Runner:
         # log their 3D trajectories to writer as an image
         s, R, t = align_umeyama(traj_gt, traj)
         traj_aligned = (s * (R @ traj.T)).T + t
-        
+
         # plot them post alignment
         fig = plot_trajectories2D(traj_gt, traj_aligned)
         img_pil, img_array = fig_to_array(fig)
         # self.writer.add_image('train/trajectories', img_array, step, dataformats='HWC')
         # wandb.log({"train/trajectories": fig}, step=step)
-        wandb.log({"trajectories": wandb.Image(img_pil)}, step=step) # NOTE: cannot have / before media
+        wandb.log({"trajectories": wandb.Image(img_pil)},
+                  step=step)  # NOTE: cannot have / before media
         # wandb.log({"train/trajectories": wandb.Image(img_array)})
         plt.close(fig)
 
@@ -842,7 +848,6 @@ class Runner:
         # self.writer.add_scalar("train/ATE", ate.item(), step)
         wandb.log({"train/ATE": ate.item()}, step=step)
 
-
     @torch.no_grad()
     def eval(self, step: int):
         """Entry for evaluation."""
@@ -850,9 +855,10 @@ class Runner:
         cfg = self.cfg
         device = self.device
 
-        valloader = torch.utils.data.DataLoader(
-            self.valset, batch_size=1, shuffle=False, num_workers=1
-        )
+        valloader = torch.utils.data.DataLoader(self.valset,
+                                                batch_size=1,
+                                                shuffle=False,
+                                                num_workers=1)
 
         if self.cfg.pose_opt:
             camtoworlds_all = self.pose_adjust.get_poses().to(torch.float32)
@@ -860,7 +866,7 @@ class Runner:
         ellipse_time = 0
         metrics = {"psnr": [], "ssim": [], "lpips": []}
         for i, data in enumerate(valloader):
-            
+
             if self.cfg.pose_opt:
                 camtoworlds = camtoworlds_all[i].unsqueeze(0).to(device)
             else:
@@ -886,10 +892,10 @@ class Runner:
             ellipse_time += time.time() - tic
 
             # write images
-            canvas = torch.cat([pixels, colors], dim=2).squeeze(0).cpu().numpy()
-            imageio.imwrite(
-                f"{self.render_dir}/val_{i:04d}.png", (canvas * 255).astype(np.uint8)
-            )
+            canvas = torch.cat([pixels, colors],
+                               dim=2).squeeze(0).cpu().numpy()
+            imageio.imwrite(f"{self.render_dir}/val_{i:04d}.png",
+                            (canvas * 255).astype(np.uint8))
 
             pixels = pixels.permute(0, 3, 1, 2)  # [1, 3, H, W]
             colors = colors.permute(0, 3, 1, 2)  # [1, 3, H, W]
@@ -905,8 +911,7 @@ class Runner:
         print(
             f"PSNR: {psnr.item():.3f}, SSIM: {ssim.item():.4f}, LPIPS: {lpips.item():.3f} "
             f"Time: {ellipse_time:.3f}s/image "
-            f"Number of GS: {len(self.splats['means3d'])}"
-        )
+            f"Number of GS: {len(self.splats['means3d'])}")
         # save stats as json
         stats = {
             "psnr": psnr.item(),
@@ -936,19 +941,22 @@ class Runner:
         camtoworlds = np.concatenate(
             [
                 camtoworlds,
-                np.repeat(np.array([[[0.0, 0.0, 0.0, 1.0]]]), len(camtoworlds), axis=0),
+                np.repeat(np.array([[[0.0, 0.0, 0.0, 1.0]]]),
+                          len(camtoworlds),
+                          axis=0),
             ],
             axis=1,
         )  # [N, 4, 4]
 
         camtoworlds = torch.from_numpy(camtoworlds).float().to(device)
-        K = torch.from_numpy(list(self.parser.Ks_dict.values())[0]).float().to(device)
+        K = torch.from_numpy(list(
+            self.parser.Ks_dict.values())[0]).float().to(device)
         width, height = list(self.parser.imsize_dict.values())[0]
 
         canvas_all = []
         for i in tqdm.trange(len(camtoworlds), desc="Rendering trajectory"):
             renders, _, _ = self.rasterize_splats(
-                camtoworlds=camtoworlds[i : i + 1],
+                camtoworlds=camtoworlds[i:i + 1],
                 Ks=K[None],
                 width=width,
                 height=height,
@@ -962,9 +970,8 @@ class Runner:
             depths = (depths - depths.min()) / (depths.max() - depths.min())
 
             # write images
-            canvas = torch.cat(
-                [colors, depths.repeat(1, 1, 3)], dim=0 if width > height else 1
-            )
+            canvas = torch.cat([colors, depths.repeat(1, 1, 3)],
+                               dim=0 if width > height else 1)
             canvas = (canvas.cpu().numpy() * 255).astype(np.uint8)
             canvas_all.append(canvas)
 
@@ -985,7 +992,8 @@ class Runner:
         device = self.device
 
         if self.cfg.pose_opt:
-            camtoworlds = self.pose_adjust.get_poses().to(torch.float32).detach().cpu().numpy()
+            camtoworlds = self.pose_adjust.get_poses().to(
+                torch.float32).detach().cpu().numpy()
         else:
             camtoworlds = self.parser.camtoworlds[:]
 
@@ -993,19 +1001,22 @@ class Runner:
         camtoworlds = np.concatenate(
             [
                 camtoworlds,
-                np.repeat(np.array([[[0.0, 0.0, 0.0, 1.0]]]), len(camtoworlds), axis=0),
+                np.repeat(np.array([[[0.0, 0.0, 0.0, 1.0]]]),
+                          len(camtoworlds),
+                          axis=0),
             ],
             axis=1,
         )  # [N, 4, 4]
 
         camtoworlds = torch.from_numpy(camtoworlds).float().to(device)
-        K = torch.from_numpy(list(self.parser.Ks_dict.values())[0]).float().to(device)
+        K = torch.from_numpy(list(
+            self.parser.Ks_dict.values())[0]).float().to(device)
         width, height = list(self.parser.imsize_dict.values())[0]
 
         canvas_all = []
         for i in tqdm.trange(len(camtoworlds), desc="Rendering trajectory"):
             renders, _, _ = self.rasterize_splats(
-                camtoworlds=camtoworlds[i : i + 1],
+                camtoworlds=camtoworlds[i:i + 1],
                 Ks=K[None],
                 width=width,
                 height=height,
@@ -1019,9 +1030,8 @@ class Runner:
             depths = (depths - depths.min()) / (depths.max() - depths.min())
 
             # write images
-            canvas = torch.cat(
-                [colors, depths.repeat(1, 1, 3)], dim=0 if width > height else 1
-            )
+            canvas = torch.cat([colors, depths.repeat(1, 1, 3)],
+                               dim=0 if width > height else 1)
             canvas = (canvas.cpu().numpy() * 255).astype(np.uint8)
             canvas_all.append(canvas)
 
@@ -1035,9 +1045,8 @@ class Runner:
         print(f"Video saved to {video_dir}/traj_{step}.mp4")
 
     @torch.no_grad()
-    def _viewer_render_fn(
-        self, camera_state: nerfview.CameraState, img_wh: Tuple[int, int]
-    ):
+    def _viewer_render_fn(self, camera_state: nerfview.CameraState,
+                          img_wh: Tuple[int, int]):
         """Callable function for the viewer."""
         W, H = img_wh
         c2w = camera_state.c2w
@@ -1059,7 +1068,8 @@ class Runner:
         """Initializes viewer scene with given train dataset"""
         if not cfg.disable_viewer:
             assert self.viewer and self.trainset
-            self.viewer.init_scene(train_dataset=self.trainset, train_state="training")
+            self.viewer.init_scene(train_dataset=self.trainset,
+                                   train_state="training")
 
 
 def main(cfg: Config):
