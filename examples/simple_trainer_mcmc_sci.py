@@ -605,9 +605,21 @@ class Runner:
             for optimizer in self.optimizers:
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
-            for optimizer in self.pose_optimizers:
-                optimizer.step()
-                optimizer.zero_grad(set_to_none=True)
+                
+            if cfg.pose_opt:
+                if ((step + 1) % cfg.pose_grad_accum == 0): # omit the last incomplete accumulation round 
+                    # scale the gradient of params in pose_adjust
+                    for param in self.pose_adjust.parameters():
+                        param.grad /= cfg.pose_grad_accum
+                    
+                    if cfg.pose_grad_clip != 0:
+                        torch.nn.utils.clip_grad_value_(self.pose_adjust.parameters(), clip_value=cfg.pose_grad_clip)
+                    
+                    # optimizing poses (support gradient clipping w/ value, gradient accumulation)
+                    for optimizer in self.pose_optimizers:
+                        optimizer.step()
+                        optimizer.zero_grad(set_to_none=True)
+                
             for optimizer in self.app_optimizers:
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
