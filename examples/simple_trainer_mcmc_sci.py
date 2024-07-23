@@ -279,7 +279,9 @@ class Runner:
             self.pose_optimizers = [
                 torch.optim.Adam(
                     self.pose_adjust.parameters(),
-                    lr=cfg.pose_opt_lr,
+                    lr=cfg.pose_opt_lr * math.sqrt(
+                        cfg.batch_size
+                    ),  # NOTE: don't know if scaling should be applied
                     weight_decay=cfg.pose_opt_reg,
                 )
             ]
