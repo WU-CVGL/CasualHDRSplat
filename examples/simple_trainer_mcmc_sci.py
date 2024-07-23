@@ -608,6 +608,7 @@ class Runner:
             for optimizer in self.app_optimizers:
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
+                
             for scheduler in schedulers:
                 scheduler.step()
 
