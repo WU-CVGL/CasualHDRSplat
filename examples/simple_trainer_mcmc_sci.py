@@ -139,6 +139,10 @@ class Config:
     pose_opt_reg: float = 1e-6
     # Add noise to camera extrinsics. This is only to test the camera pose optimization.
     pose_noise: float = 0.0
+    # pose optimization gradient clipping (0.4 works for cozy2room bezier)
+    pose_grad_clip: float = 0.0
+    # pose optimization gradient accumulation
+    pose_grad_accum: int = 1
     # different trajectory representations
     traj_mode: str = 'bezier'
     # degree of Bezier curve
