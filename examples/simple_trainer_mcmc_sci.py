@@ -570,7 +570,8 @@ class Runner:
                     canvas = torch.cat([pixels, colors], dim=2).detach().cpu().numpy()
                     canvas = canvas.reshape(-1, *canvas.shape[2:])
                     # self.writer.add_image("train/render", canvas, step)
-                    wandb.log({"train/render": canvas}, step=step)
+                    # NOTE: this does not work well with wandb yet
+                    wandb.log({"render": wandb.Image(canvas)}, step=step)
 
                 # self.writer.flush()
 
