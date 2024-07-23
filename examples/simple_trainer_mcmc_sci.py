@@ -104,7 +104,7 @@ class Config:
     # Maximum number of GSs.
     cap_max: int = 1_000_000
     # MCMC samping noise learning rate
-    noise_lr = 5e5
+    noise_lr: float = 5e5
     # Opacity regularization
     opacity_reg = 0.01
     # Scale regularization
