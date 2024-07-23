@@ -37,6 +37,8 @@ from gsplat.cuda_legacy._torch_impl import scale_rot_to_cov3d
 from simple_trainer import create_splats_with_optimizers
 from trajectory_evaluation import plot_trajectories2D, align_umeyama, compute_absolute_error_translation, fig_to_array
 import pypose as pp
+from schedulers import get_exponential_decay_scheduler
+
 
 @dataclass
 class Config:
@@ -138,6 +140,10 @@ class Config:
     pose_opt: bool = False
     # Learning rate for camera optimization
     pose_opt_lr: float = 1e-5
+    # Final learning rate for camera optimization
+    pose_opt_lr_final: float = 5e-6
+    # Warmup steps for pose learning rate schedule
+    pose_opt_lr_warmup_steps: int = 0
     # Regularization for camera optimization as weight decay
     pose_opt_reg: float = 1e-6
     # Add noise to camera extrinsics. This is only to test the camera pose optimization.
@@ -410,18 +416,19 @@ class Runner:
                         self.pose_optimizers[0], gamma=0.01 ** (1.0 / max_steps))
                 schedulers.append(pose_scheduler)
             else:
-                # pose_scheduler = torch.optim.lr_scheduler.ChainedScheduler([torch.optim.lr_scheduler.MultiStepLR(self.pose_optimizers[0], milestones=[self.cfg.refine_start_iter//2, self.cfg.refine_start_iter], gamma=0.1),
-                #                                         torch.optim.lr_scheduler.ExponentialLR(self.pose_optimizers[0], gamma=0.01 ** (1.0 / (max_steps - self.cfg.refine_start_iter)))])
-                pose_scheduler = torch.optim.lr_scheduler.ExponentialLR(
-                        self.pose_optimizers[0], gamma=0.0005 ** (1.0 / max_steps))
-                schedulers.append(pose_scheduler)
-                pass
+                # pose_scheduler = torch.optim.lr_scheduler.ExponentialLR(
+                #         self.pose_optimizers[0], gamma=0.0005 ** (1.0 / max_steps))
+                # schedulers.append(pose_scheduler)
 
-            # only optimize poses at early stage then solely optimizing gaussians
-            # pose_scheduler = torch.optim.lr_scheduler.MultiStepLR(self.pose_optimizers[0], milestones=[self.cfg.refine_start_iter], gamma=0)
-            # schedulers.append(pose_scheduler)
-                
-            
+                pose_scheduler = get_exponential_decay_scheduler(
+                    self.pose_optimizers[0],
+                    cfg.pose_opt_lr,
+                    cfg.pose_opt_lr_final,
+                    max_steps,
+                    lr_pre_warmup=0,
+                    warmup_steps=cfg.pose_opt_lr_warmup_steps)
+                schedulers.append(pose_scheduler)
+
         trainloader = torch.utils.data.DataLoader(
             self.trainset,
             batch_size=self.num_imgs,
