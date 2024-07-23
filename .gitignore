@@ -127,3 +127,5 @@ results
 examples/*.png
 
 *.png
+
+examples/wandb
