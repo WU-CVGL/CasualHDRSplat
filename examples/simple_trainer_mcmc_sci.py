@@ -554,7 +554,9 @@ class Runner:
                 wandb.log({"train/ssimloss": ssimloss.item()}, step=step)
                 wandb.log({"train/num_GS": len(self.splats["means3d"])}, step=step)
                 wandb.log({"train/mem": mem}, step=step)
-                wandb.log({"train/poseLR": pose_scheduler.get_last_lr()[0]}, step=step)
+                wandb.log({"learning_rate/means3d": schedulers[0].get_last_lr()[0]}, step=step)
+                if cfg.pose_opt:
+                    wandb.log({"learning_rate/pose": pose_scheduler.get_last_lr()[0]}, step=step)
                 
                 # monitor ATE
                 if cfg.pose_opt:
