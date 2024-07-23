@@ -110,6 +110,9 @@ class Config:
     # Scale regularization
     scale_reg = 0.01
 
+    # warmup steps for learning means3d
+    means3d_opt_lr_warmup_steps: int = 0
+
     # Start refining GSs after this iteration
     refine_start_iter: int = 500
     # Stop refining GSs after this iteration
@@ -378,12 +381,28 @@ class Runner:
         max_steps = cfg.max_steps
         init_step = 0
 
+        # schedulers = [
+        #     # means3d has a learning rate schedule, that end at 0.01 of the initial value
+        #     torch.optim.lr_scheduler.ExponentialLR(
+        #         self.optimizers[0], gamma=0.01 ** (1.0 / max_steps)
+        #     ),
+        # ]
+
+        means3d_init_lr = self.optimizers[0].param_groups[0]['lr']
+        means3d_final_lr = 0.01 * means3d_init_lr
+        means3d_scheduler = get_exponential_decay_scheduler(
+            self.optimizers[0],
+            means3d_init_lr,
+            means3d_final_lr,
+            max_steps,
+            lr_pre_warmup=0,
+            warmup_steps=cfg.means3d_opt_lr_warmup_steps)
+
         schedulers = [
             # means3d has a learning rate schedule, that end at 0.01 of the initial value
-            torch.optim.lr_scheduler.ExponentialLR(
-                self.optimizers[0], gamma=0.01 ** (1.0 / max_steps)
-            ),
+            means3d_scheduler
         ]
+
         if cfg.pose_opt:
             if cfg.pose_refine:
                 # pose optimization has a learning rate schedule
