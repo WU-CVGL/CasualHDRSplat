@@ -114,7 +114,13 @@ class Config:
     scale_reg = 0.01
 
     # warmup steps for learning means3d
-    means3d_opt_lr_warmup_steps: int = 0
+    means3d_warmup_steps: int = 0
+    # warmup steps for learning scales
+    scales_warmup_steps: int = 0
+    # warmup steps for quats
+    quats_warmup_steps: int = 0
+    # warmup steps for learning opacities
+    opacities_warmup_steps: int = 0
 
     # Start refining GSs after this iteration
     refine_start_iter: int = 500
@@ -410,12 +416,46 @@ class Runner:
             means3d_final_lr,
             max_steps,
             lr_pre_warmup=0,
-            warmup_steps=cfg.means3d_opt_lr_warmup_steps)
+            warmup_steps=cfg.means3d_warmup_steps)
 
         schedulers = [
             # means3d has a learning rate schedule, that end at 0.01 of the initial value
             means3d_scheduler
         ]
+
+        if cfg.scales_warmup_steps > 0:
+            # try to add scheduler also for other attributes of gaussians
+            scales_init_lr = self.optimizers[1].param_groups[0]['lr']
+            scales_scheduler = get_exponential_decay_scheduler(
+                self.optimizers[1],
+                scales_init_lr,
+                max_steps=max_steps,
+                lr_pre_warmup=0,
+                warmup_steps=cfg.scales_warmup_steps)
+
+            schedulers.append(scales_scheduler)
+
+        if cfg.quats_warmup_steps > 0:
+            # try to add scheduler also for other attributes of gaussians
+            quats_init_lr = self.optimizers[2].param_groups[0]['lr']
+            quats_scheduler = get_exponential_decay_scheduler(
+                self.optimizers[2],
+                quats_init_lr,
+                max_steps=max_steps,
+                lr_pre_warmup=0,
+                warmup_steps=cfg.quats_warmup_steps)
+
+            schedulers.append(quats_scheduler)
+
+        if cfg.opacities_warmup_steps > 0:
+            opacities_init_lr = self.optimizers[3].param_groups[0]['lr']
+            opacities_scheduler = get_exponential_decay_scheduler(
+                self.optimizers[3],
+                opacities_init_lr,
+                max_steps=max_steps,
+                lr_pre_warmup=0,
+                warmup_steps=cfg.opacities_warmup_steps)
+            schedulers.append(opacities_scheduler)
 
         if cfg.pose_opt:
             if cfg.pose_refine:
@@ -582,6 +622,27 @@ class Runner:
                         {
                             "learning_rate/pose":
                             pose_scheduler.get_last_lr()[0]
+                        },
+                        step=step)
+                if cfg.scales_warmup_steps > 0:
+                    wandb.log(
+                        {
+                            "learning_rate/scales":
+                            scales_scheduler.get_last_lr()[0]
+                        },
+                        step=step)
+                if cfg.quats_warmup_steps > 0:
+                    wandb.log(
+                        {
+                            "learning_rate/quats":
+                            quats_scheduler.get_last_lr()[0]
+                        },
+                        step=step)
+                if cfg.opacities_warmup_steps > 0:
+                    wandb.log(
+                        {
+                            "learning_rate/opacities":
+                            opacities_scheduler.get_last_lr()[0]
                         },
                         step=step)
 
