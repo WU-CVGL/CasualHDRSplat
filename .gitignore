@@ -126,3 +126,7 @@ data
 results
 
 examples/*.png
+
+*.png
+
+examples/wandb

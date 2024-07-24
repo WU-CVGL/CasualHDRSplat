@@ -78,26 +78,56 @@ class BadCameraOptModule(torch.nn.Module):
 class PoseOptModule(torch.nn.Module):
     """Camera pose optimization module w/ Bezier curve"""
 
-    def __init__(self, camera_to_worlds, bezier_degree=10, initial_noise=1e-5):
+    def __init__(self, camera_to_worlds, traj_mode='bezier', bezier_degree=10, initial_noise=1e-5, pose_refine=False, pose_noise=0):
         super().__init__()
-
+        self.pose_refine = pose_refine
         self.num_views = camera_to_worlds.shape[0]
+        self.traj_mode = traj_mode
 
-        poses_control_knots_SE3 = pp.mat2SE3(camera_to_worlds, check=False)  # NOTE: hack for now
-        poses_control_knots_SE3_mid = poses_control_knots_SE3[self.num_views // 2]
-        poses_control_knots_SE3 = poses_control_knots_SE3_mid.unsqueeze(0).repeat(bezier_degree, 1).unsqueeze(0)
-        poses_control_knots_se3 = poses_control_knots_SE3.Log()
+        if not pose_refine:
+            if traj_mode == 'bezier':
+                poses_control_knots_SE3 = pp.mat2SE3(camera_to_worlds, check=False) # NOTE: hack for now
+                poses_control_knots_SE3_mid = poses_control_knots_SE3[self.num_views//2]
+                poses_control_knots_SE3 = poses_control_knots_SE3_mid.unsqueeze(0).repeat(bezier_degree,1).unsqueeze(0)
+                poses_control_knots_se3 = poses_control_knots_SE3.Log()
 
-        poses_noise_se3 = pp.randn_se3(1, bezier_degree, sigma=initial_noise)
-        poses_control_knots_se3 += poses_noise_se3
+                poses_noise_se3 = pp.randn_se3(1, bezier_degree, sigma=initial_noise)
+                poses_control_knots_se3 += poses_noise_se3
 
-        self.pose_control_knots = pp.Parameter(poses_control_knots_se3)
+                self.pose_control_knots = pp.Parameter(poses_control_knots_se3)
+            elif traj_mode == 'individual':
+                poses_control_knots_SE3 = pp.mat2SE3(camera_to_worlds, check=False) # NOTE: hack for now
+                poses_control_knots_SE3_mid = poses_control_knots_SE3[self.num_views//2]
+
+                poses_control_knots_SE3 = poses_control_knots_SE3_mid.unsqueeze(0).repeat(self.num_views,1)
+                poses_control_knots_se3 = poses_control_knots_SE3.Log()
+
+                poses_noise_se3 = pp.randn_se3(self.num_views, sigma=initial_noise)
+                poses_control_knots_se3 += poses_noise_se3
+
+                self.pose_control_knots = pp.Parameter(poses_control_knots_se3)
+
+        else:
+            poses_control_knots_SE3 = pp.mat2SE3(camera_to_worlds, check=False) # NOTE: hack for now
+            poses_control_knots_se3 = poses_control_knots_SE3.Log()
+            poses_noise_se3 = pp.randn_se3(self.num_views, sigma=pose_noise)
+            poses_control_knots_se3 += poses_noise_se3
+            self.pose_control_knots = pp.Parameter(poses_control_knots_se3)
 
     def get_poses(self):
-        # TODO: check if the device assignment here is legit
-        u = torch.linspace(start=0, end=1, steps=self.num_views, device=self.pose_control_knots.device)
-        poses = bezier_interpolation(self.pose_control_knots.Exp(), u)
-        poses = poses.matrix()[0]  # (N, 4, 4)
+        if not self.pose_refine:
+            if self.traj_mode == 'bezier':
+
+                u = torch.linspace(start=0, end=1, steps=self.num_views, device=self.pose_control_knots.device)
+                poses = bezier_interpolation(self.pose_control_knots.Exp(), u)
+                poses = poses.matrix()[0] # (N, 4, 4)
+
+            elif self.traj_mode == 'individual':
+
+                poses = self.pose_control_knots.matrix()
+
+        else:
+            poses = self.pose_control_knots.matrix()
 
         return poses
 
