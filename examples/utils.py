@@ -101,6 +101,36 @@ class PoseOptModule(torch.nn.Module):
 
         return poses
 
+class CameraOptModuleSE3(torch.nn.Module):
+    """Camera pose optimization module."""
+
+    def __init__(self, n: int):
+        super().__init__()
+        self.num_cameras = n
+        self.poses_opt = None
+
+    def zero_init(self):
+        self.poses_opt = pp.Parameter(pp.identity_se3(self.num_cameras).cuda())
+
+    def random_init(self, std: float):
+        self.poses_opt = pp.Parameter(pp.randn_se3(self.num_cameras, sigma=std).cuda())
+
+    def forward(self, camtoworlds: Tensor, embed_ids: Tensor) -> Tensor:
+        """Adjust camera pose based on deltas.
+
+        Args:
+            camtoworlds: (..., 4, 4)
+            embed_ids: (...,)
+
+        Returns:
+            updated camtoworlds: (..., 4, 4)
+        """
+        assert camtoworlds.shape[:-2] == embed_ids.shape
+        batch_shape = camtoworlds.shape[:-2]
+        pose_deltas = self.poses_opt[embed_ids]
+
+        transform = (pose_deltas).Exp().matrix()
+        return torch.matmul(camtoworlds, transform)
 
 class CameraOptModule(torch.nn.Module):
     """Camera pose optimization module."""
