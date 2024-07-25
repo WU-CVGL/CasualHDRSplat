@@ -47,13 +47,13 @@ class Config:
     data_dir: str = "/datasets/bad-gaussian/data/bad-nerf-gtK-colmap-nvs/blurtanabata"
     # Downsample factor for the dataset
     data_factor: int = 1
-    # How much to scale the camera origins by
-    scale_factor: float = 1
+    # How much to scale the camera origins by. Default: 0.25 for LLFF scenes.
+    scale_factor: float = 0.25
     # Directory to save results
     # result_dir: str = "results/garden_vanilla"
     # result_dir: str = "results/tanabata_vanilla"
     result_dir: str = "results/tanabata_mcmc_500k_grad25"
-    # result_dir: str = "results/tanabata_den2e-4_grad25"
+    # result_dir: str = "results/tanabata_den4e-4_grad25_absgrad"
     # Every N images there is a test image
     test_every: int = 8
     # Random crop size for training  (experimental)
@@ -98,6 +98,8 @@ class Config:
 
     # whether to use MCMC
     enable_mcmc: bool = True
+    # How much to scale the camera origins by
+    scale_factor_mcmc: float = 1.0
     # MCMC Maximum number of GSs.
     cap_max: int = 500_000
     # MCMC samping noise learning rate
@@ -139,6 +141,8 @@ class Config:
     refine_every: int = 100
     # Reset opacities every this steps
     reset_every: int = 3000
+    # Use absolute gradient for pruning. This typically requires larger --grow_grad2d, e.g., 0.0008 or 0.0006
+    absgrad: bool = True
 
     ########### Rasterization ###############
 
@@ -146,8 +150,6 @@ class Config:
     packed: bool = False
     # Use sparse gradients for optimization. (experimental)
     sparse_grad: bool = False
-    # Use absolute gradient for pruning. This typically requires larger --grow_grad2d, e.g., 0.0008 or 0.0006
-    absgrad: bool = False
     # Anti-aliasing in rasterization. Might slightly hurt quantitative metrics.
     antialiased: bool = False
     # Whether to use revised opacity heuristic from arXiv:2404.06109 (experimental)
@@ -228,6 +230,7 @@ class Config:
     def __post_init__(self):
         if self.enable_mcmc:
             print("MCMC enabled.")
+            self.scale_factor = self.scale_factor_mcmc
             self.init_opa = self.init_opa_mcmc
             self.init_scale = self.init_scale_mcmc
             self.refine_start_iter = self.refine_start_iter_mcmc
@@ -814,7 +817,11 @@ class DeblurRunner(Runner):
             self.valset, batch_size=1, shuffle=False, num_workers=1
         )
 
-        ellipse_time = 0
+        # Freeze the scene
+        for optimizer in self.optimizers.values():
+            for param_group in optimizer.param_groups:
+                param_group["params"][0].requires_grad = False
+
         metrics = {"psnr": [], "ssim": [], "lpips": []}
         for i, data in enumerate(valloader):
             camtoworlds = data["camtoworld"].to(device)
@@ -824,10 +831,6 @@ class DeblurRunner(Runner):
             image_ids = data["image_id"].to(device)
 
             pixels_ = pixels.permute(0, 3, 1, 2)  # [1, 3, H, W]
-
-            for optimizer in self.optimizers.values():
-                for param_group in optimizer.param_groups:
-                    param_group["params"][0].detach()
 
             novel_view_pose_adjust = CameraOptModuleSE3(1).to(self.device)
             novel_view_pose_adjust.random_init(cfg.pose_noise)
@@ -877,7 +880,7 @@ class DeblurRunner(Runner):
                         ssim = self.ssim(colors_, pixels_)
                         lpips = self.lpips(colors_.detach(), pixels_)
                         print(
-                            f"NVS at Step_{step:04d}:"
+                            f"NVS eval at Step_{step:04d}:"
                             f"NVS_IMG_#{i:04d}_step_{j:04d}:"
                             f"PSNR: {psnr.item():.3f}, SSIM: {ssim.item():.4f}, LPIPS: {lpips.item():.3f} "
                         )
@@ -917,6 +920,11 @@ class DeblurRunner(Runner):
         for k, v in stats.items():
             self.writer.add_scalar(f"nvs/{k}", v, step)
         self.writer.flush()
+
+        # Unfreeze the scene
+        for optimizer in self.optimizers.values():
+            for param_group in optimizer.param_groups:
+                param_group["params"][0].requires_grad = True
 
     @torch.no_grad()
     def render_traj(self, step: int):
