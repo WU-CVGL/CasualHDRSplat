@@ -43,8 +43,8 @@ class DeblurNerfDataset(Dataset):
             load_depths: bool = False,
     ):
         super().__init__(parser, split, patch_size, load_depths)
-        self.parser = deepcopy(parser)
         if split == "test":
+            self.parser = deepcopy(parser)
             gt_dir = parser.data_dir / "images_test"
             gt_image_paths = _find_files(gt_dir, ["*.png", "*.jpg", "*.JPG", "*.PNG"])
             num_gt_images = len(gt_image_paths)
@@ -54,3 +54,5 @@ class DeblurNerfDataset(Dataset):
                 ]
             assert num_gt_images == 0 or num_gt_images == len(self.parser.image_names)
             self.parser.image_paths = gt_image_paths
+        else:
+            self.parser = parser

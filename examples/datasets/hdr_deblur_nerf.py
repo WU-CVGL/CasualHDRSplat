@@ -42,8 +42,11 @@ class HdrDeblurNerfDataset(DeblurNerfDataset):
         if len(timestamps) == 1:
             timestamps = timestamps.expand(len(outputs.image_filenames), 1)
 
-        self.parser.timestamps = timestamps
-        self.parser.exposure_times = exposure_times
+        parser.exposure_times = exposure_times
+        parser.timestamps = timestamps
+
+        # Drop first and last images before we implement the spline extrapolation.
+        self.indices = self.indices[2:-2]
 
     def __getitem__(self, item: int) -> Dict[str, Any]:
         data = super().__getitem__(item)

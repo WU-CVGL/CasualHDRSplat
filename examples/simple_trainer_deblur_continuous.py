@@ -5,7 +5,6 @@ import time
 from typing import Dict, List, Optional, Tuple
 
 import imageio
-import nerfview
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -13,11 +12,6 @@ import tqdm
 import tyro
 import viser
 from dataclasses import dataclass, field
-from torch import Tensor
-from torch.utils.tensorboard import SummaryWriter
-from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
-from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
-
 from datasets.colmap import Dataset
 from datasets.colmap_dataparser import ColmapParser
 from datasets.deblur_nerf import DeblurNerfDataset
@@ -25,15 +19,21 @@ from datasets.hdr_deblur_nerf import HdrDeblurNerfDataset
 from datasets.traj import generate_interpolated_path
 from gsplat.rendering import rasterization
 from gsplat.strategy import DefaultStrategy, MCMCStrategy
-from pose_viewer import PoseViewer
 from nerfview.viewer import Viewer
+from pose_viewer import PoseViewer
 from simple_trainer import create_splats_with_optimizers, Runner
+from torch import Tensor
+from torch.utils.tensorboard import SummaryWriter
+from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
+from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 from utils import (
     AppearanceOptModule,
-    BadCameraOptModule,
     CameraOptModuleSE3,
     set_random_seed,
 )
+from badgs.camera_trajectory import CameraTrajectoryConfig
+from badgs.spline import SplineConfig
+from badgs.spline_optimizer import SplineOptimizerConfig
 
 
 @dataclass
@@ -181,8 +181,6 @@ class Config:
 
     ########### Camera Opt ###############
 
-    # Enable camera optimization.
-    pose_opt: bool = True
     # Learning rate for camera optimization
     pose_opt_lr: float = 1e-3
     # Regularization for camera optimization as weight decay
@@ -359,20 +357,30 @@ class DeblurRunner(Runner):
             self.strategy_state = self.strategy.initialize_state()
 
         self.pose_optimizers = []
-        if cfg.pose_opt:
-            self.pose_adjust = BadCameraOptModule(
-                len(self.trainset),
-                cfg.num_control_knots,
-                cfg.num_virtual_views
-            ).to(self.device)
-            self.pose_adjust.random_init(cfg.pose_noise)
-            self.pose_optimizers = [
-                torch.optim.Adam(
-                    self.pose_adjust.parameters(),
-                    lr=cfg.pose_opt_lr * math.sqrt(cfg.batch_size),
-                    weight_decay=cfg.pose_opt_reg,
-                )
-            ]
+        self.camera_trajectory_config = CameraTrajectoryConfig(
+            spline=SplineConfig(
+                degree=3,
+                spline_optimizer=SplineOptimizerConfig(
+                    mode="SE3",
+                    initial_noise_se3_std=1e-5,
+                ),
+            ),
+            optimize_exposure_time=True,
+            num_virtual_views=10,
+        )
+        self.camera_trajectory = self.camera_trajectory_config.setup(
+            timestamps=self.parser.timestamps,
+            exposure_times=self.parser.exposure_times,
+            c2ws=torch.tensor(self.parser.camtoworlds).float(),
+            device="cuda",
+        )
+        self.pose_optimizers = [
+            torch.optim.Adam(
+                self.camera_trajectory.parameters(),
+                lr=cfg.pose_opt_lr * math.sqrt(cfg.batch_size),
+                weight_decay=cfg.pose_opt_reg,
+            )
+        ]
 
         self.app_optimizers = []
         if cfg.app_opt:
@@ -489,13 +497,12 @@ class DeblurRunner(Runner):
                 self.optimizers["means"], gamma=0.01 ** (1.0 / max_steps)
             ),
         ]
-        if cfg.pose_opt:
-            # pose optimization has a learning rate schedule
-            pose_scheduler = torch.optim.lr_scheduler.ExponentialLR(
-                self.pose_optimizers[0],
-                gamma=cfg.pose_opt_lr_decay ** (1.0 / max_steps)
-            )
-            schedulers.append(pose_scheduler)
+        # pose optimization has a learning rate schedule
+        pose_scheduler = torch.optim.lr_scheduler.ExponentialLR(
+            self.pose_optimizers[0],
+            gamma=cfg.pose_opt_lr_decay ** (1.0 / max_steps)
+        )
+        schedulers.append(pose_scheduler)
 
         trainloader = torch.utils.data.DataLoader(
             self.trainset,
@@ -526,24 +533,23 @@ class DeblurRunner(Runner):
                 trainloader_iter = iter(trainloader)
                 data = next(trainloader_iter)
 
-            camtoworlds = camtoworlds_gt = data["camtoworld"].to(device)  # [1, 4, 4]
+            camtoworlds_gt = data["camtoworld"].to(device)  # [1, 4, 4]
             Ks = data["K"].to(device)  # [1, 3, 3]
             pixels = data["image"].to(device) / 255.0  # [1, H, W, 3]
             num_train_rays_per_step = (
                     pixels.shape[0] * pixels.shape[1] * pixels.shape[2]
             )
-            image_ids = data["image_id"].to(device)
             if cfg.depth_loss:
                 points = data["points"].to(device)  # [1, M, 2]
                 depths_gt = data["depths"].to(device)  # [1, M]
 
             height, width = pixels.shape[1:3]
 
-            if cfg.pose_opt:
-                assert camtoworlds.shape[0] == 1
-                camtoworlds = self.pose_adjust(camtoworlds, image_ids, "uniform")[0, :, ...]
-                num_cur_virt_views = camtoworlds.shape[0]
-                Ks = Ks.tile((num_cur_virt_views, 1, 1))
+            image_ids = data["image_id"]
+            poses, exposure_times = self.camera_trajectory(image_ids, "uniform")
+            camtoworlds = poses.matrix()
+            num_cur_virt_views = camtoworlds.shape[0]
+            Ks = Ks.tile((num_cur_virt_views, 1, 1))
 
             # sh schedule
             sh_degree_to_use = min(step // cfg.sh_degree_interval, cfg.sh_degree)
@@ -637,7 +643,7 @@ class DeblurRunner(Runner):
             desc = f"loss={loss.item():.3f}| " f"sh degree={sh_degree_to_use}| "
             if cfg.depth_loss:
                 desc += f"depth loss={depthloss.item():.6f}| "
-            if cfg.pose_opt and cfg.pose_noise:
+            if cfg.pose_noise:
                 # monitor the pose error if we inject noise
                 pose_err = F.l1_loss(camtoworlds_gt, camtoworlds)
                 desc += f"pose err={pose_err.item():.6f}| "
@@ -656,11 +662,18 @@ class DeblurRunner(Runner):
                 self.writer.add_scalar("train/poseLR", pose_scheduler.get_last_lr()[0], step)
 
                 # monitor ATE
-                if cfg.pose_opt:
-                    self.writer.add_scalar("train/camera_opt_translation", self.pose_adjust.embeds.weight[:, :3].mean(),
-                                           step)
-                    self.writer.add_scalar("train/camera_opt_rotation", self.pose_adjust.embeds.weight[:, 3:].mean(),
-                                           step)
+                metrics_dict = {}
+                self.camera_trajectory.get_metrics_dict(metrics_dict)
+                self.writer.add_scalar(
+                    "train/camera_opt_translation",
+                    metrics_dict["camera_opt_translation"],
+                    step
+                )
+                self.writer.add_scalar(
+                    "train/camera_opt_rotation",
+                    metrics_dict["camera_opt_rotation"],
+                    step
+                )
                 #     self.visualize_traj(step)
 
                 if cfg.depth_loss:
@@ -736,7 +749,7 @@ class DeblurRunner(Runner):
                     {
                         "step": step,
                         "splats": self.splats.state_dict(),
-                        "camera_opt": self.pose_adjust.state_dict(),
+                        "camera_trajectory": self.camera_trajectory.state_dict(),
                     },
                     f"{self.ckpt_dir}/ckpt_{step}.pt",
                 )
@@ -772,14 +785,14 @@ class DeblurRunner(Runner):
         ellipse_time = 0
         metrics = {"psnr": [], "ssim": [], "lpips": []}
         for i, data in enumerate(testloader):
-            camtoworlds = data["camtoworld"].to(device)
+            camtoworlds_gt = data["camtoworld"].to(device)
             Ks = data["K"].to(device)
             pixels = data["image"].to(device) / 255.0
             height, width = pixels.shape[1:3]
-            image_ids = data["image_id"].to(device)
 
-            if cfg.pose_opt:
-                camtoworlds = self.pose_adjust(camtoworlds, image_ids, "mid")
+            image_ids = data["image_id"]
+            pose, exposure_time = self.camera_trajectory(image_ids, "start")
+            camtoworlds = pose.matrix()[None, ...]
 
             torch.cuda.synchronize()
             tic = time.time()
@@ -1021,7 +1034,10 @@ def main(cfg: Config):
         ckpt = torch.load(cfg.ckpt, map_location=runner.device)
         for k in runner.splats.keys():
             runner.splats[k].data = ckpt["splats"][k].detach().to(runner.device)
-            runner.pose_adjust.embeds.weight.data = ckpt["camera_opt"]["embeds.weight"].detach().to(runner.device)
+            runner.camera_trajectory.exposure_times = ckpt[
+                "camera_trajectory"]["exposure_time"].detach().to(runner.device)
+            runner.camera_trajectory.spline.spline_optimizer.pose_adjustment = ckpt[
+                "camera_trajectory"]["'spline.spline_optimizer.pose_adjustment'"].detach().to(runner.device)
         runner.eval_deblur(step=ckpt["step"])
         if runner.valset is not None:
             runner.eval_novel_view(step=ckpt["step"])
