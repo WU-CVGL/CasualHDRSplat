@@ -13,22 +13,25 @@ import tqdm
 import tyro
 import viser
 from dataclasses import dataclass, field
-from datasets.colmap import Dataset
-from datasets.colmap_dataparser import ColmapParser
-from datasets.traj import generate_interpolated_path
-from gsplat.rendering import rasterization
-from pose_viewer import PoseViewer
 from torch import Tensor
 from torch.utils.tensorboard import SummaryWriter
 from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
+
+from datasets.colmap import Dataset
+from datasets.colmap_dataparser import ColmapParser
+from datasets.deblur_nerf import DeblurNerfDataset
+from datasets.hdr_deblur_nerf import HdrDeblurNerfDataset
+from datasets.traj import generate_interpolated_path
+from gsplat.rendering import rasterization
+from gsplat.strategy import DefaultStrategy, MCMCStrategy
+from pose_viewer import PoseViewer
+from nerfview.viewer import Viewer
+from simple_trainer import create_splats_with_optimizers, Runner
 from utils import (
     AppearanceOptModule,
     BadCameraOptModule,
-    CameraOptModule,
-    knn,
-    normalized_quat_to_rotmat,
-    rgb_to_sh,
+    CameraOptModuleSE3,
     set_random_seed,
 )
 
@@ -37,19 +40,27 @@ from utils import (
 class Config:
     # Disable viewer
     disable_viewer: bool = False
+    # Visualize cameras in viewer
+    visualize_cameras: bool = False
+
     # Path to the .pt file. If provide, it will skip training and render a video
+    # ckpt: Optional[str] = "results/tanabata_mcmc_500k_grad25/ckpts/ckpt_29999.pt"
     ckpt: Optional[str] = None
 
     # Path to the Mip-NeRF 360 dataset
     # data_dir: str = "data/360_v2/garden"
-    data_dir: str = "/datasets/bad-gaussian/data/bad-nerf-gtK-colmap-nvs/blurtanabata"
+    # data_dir: str = "/datasets/bad-gaussian/data/bad-nerf-gtK-colmap-nvs/blurtanabata"
+    data_dir: str = "/datasets/HDR-Bad-Gaussian/images_ns_process"
     # Downsample factor for the dataset
-    data_factor: int = 1
-    # How much to scale the camera origins by
+    data_factor: int = 4
+    # How much to scale the camera origins by. Default: 0.25 for LLFF scenes.
     scale_factor: float = 0.25
     # Directory to save results
-    # result_dir: str = "results/garden"
-    result_dir: str = "results/tanabata_vanilla_4e-4_lr1e-3_1e-6_sf0.25_scale-reg_grad25"
+    # result_dir: str = "results/garden_vanilla"
+    # result_dir: str = "results/tanabata_vanilla"
+    # result_dir: str = "results/tanabata_mcmc_500k_grad25"
+    # result_dir: str = "results/tanabata_den4e-4_grad25_absgrad"
+    result_dir: str = "results/hdr_ikun_mcmc_test"
     # Every N images there is a test image
     test_every: int = 8
     # Random crop size for training  (experimental)
@@ -68,9 +79,9 @@ class Config:
     # Number of training steps
     max_steps: int = 30_000
     # Steps to evaluate the model
-    eval_steps: List[int] = field(default_factory=lambda: [7_000, 30_000])
+    eval_steps: List[int] = field(default_factory=lambda: [3_000, 7_000, 10_000, 15_000, 20_000, 30_000])
     # Steps to save the model
-    save_steps: List[int] = field(default_factory=lambda: [7_000, 30_000])
+    save_steps: List[int] = field(default_factory=lambda: [3_000, 7_000, 10_000, 15_000, 20_000, 30_000])
 
     # Initialization strategy
     init_type: str = "sfm"
@@ -82,10 +93,6 @@ class Config:
     sh_degree: int = 3
     # Turn on another SH degree every this steps
     sh_degree_interval: int = 1000
-    # Initial opacity of GS
-    init_opa: float = 0.1
-    # Initial scale of GS
-    init_scale: float = 1.0
     # Weight for SSIM loss
     ssim_lambda: float = 0.2
 
@@ -94,35 +101,85 @@ class Config:
     # Far plane clipping distance
     far_plane: float = 1e10
 
+    ########### Motion Deblur ###############
+
+    # BAD-Gaussians: Number of virtual cameras
+    num_virtual_views: int = 10
+    # BAD-Gaussians: Number of control knots
+    num_control_knots: int = 2
+
+    ########### HDR ###############
+
+    # Read HDR Deblur-NeRF Dataset
+    enable_hdr_deblur: bool = True
+
+    ###### MCMC parameters ######
+
+    # whether to use MCMC
+    enable_mcmc: bool = True
+    # How much to scale the camera origins by
+    scale_factor_mcmc: float = 1.0
+    # MCMC Maximum number of GSs.
+    cap_max: int = 500_000
+    # MCMC samping noise learning rate
+    noise_lr = 5e5
+    # MCMC Opacity regularization
+    opacity_reg = 0.01
+    # MCMC Scale regularization
+    scale_reg = 0.01
+    # MCMC Initial opacity of GS
+    init_opa_mcmc: float = 0.5
+    # MCMC Initial scale of GS
+    init_scale_mcmc: float = 0.1
+    # Start refining GSs after this iteration
+    refine_start_iter_mcmc: int = 500
+    # Stop refining GSs after this iteration
+    refine_stop_iter_mcmc: int = 25_000
+    # Refine GSs every this steps
+    refine_every_mcmc: int = 100
+
+    ###### Non-MCMC parameters ######
+
+    # Initial opacity of GS
+    init_opa: float = 0.1
+    # Initial scale of GS
+    init_scale: float = 1.0
     # GSs with opacity below this value will be pruned
     prune_opa: float = 0.005
     # GSs with image plane gradient above this value will be split/duplicated
-    grow_grad2d: float = 4e-4
+    grow_grad2d: float = 4e-3
     # GSs with scale below this value will be duplicated. Above will be split
     grow_scale3d: float = 0.01
     # GSs with scale above this value will be pruned.
     prune_scale3d: float = 0.1
-
     # Start refining GSs after this iteration
     refine_start_iter: int = 500
     # Stop refining GSs after this iteration
     refine_stop_iter: int = 15_000
-    # Reset opacities every this steps
-    reset_every: int = 3000
     # Refine GSs every this steps
     refine_every: int = 100
+    # Reset opacities every this steps
+    reset_every: int = 3000
+    # Use absolute gradient for pruning. This typically requires larger --grow_grad2d, e.g., 0.0008 or 0.0006
+    absgrad: bool = True
+
+    ########### Rasterization ###############
 
     # Use packed mode for rasterization, this leads to less memory usage but slightly slower.
     packed: bool = False
     # Use sparse gradients for optimization. (experimental)
     sparse_grad: bool = False
-    # Use absolute gradient for pruning. This typically requires larger --grow_grad2d, e.g., 0.0008 or 0.0006
-    absgrad: bool = False
     # Anti-aliasing in rasterization. Might slightly hurt quantitative metrics.
     antialiased: bool = False
+    # Whether to use revised opacity heuristic from arXiv:2404.06109 (experimental)
+    revised_opacity: bool = False
+
+    ########### Background ###############
 
     # Use random background for training to discourage transparency
-    random_bkgd: bool = False
+    random_bkgd: bool = True
+
+    ########### Camera Opt ###############
 
     # Enable camera optimization.
     pose_opt: bool = True
@@ -133,9 +190,22 @@ class Config:
     # Learning rate decay rate of camera optimization
     pose_opt_lr_decay: float = 1e-3
     # Add noise to camera extrinsics. This is only to test the camera pose optimization.
-    pose_noise: float = 0.0
+    pose_noise: float = 1e-5
     # Pose gradient accumulation steps
     pose_gradient_accumulation_steps: int = 25
+
+    ########### Novel View Eval Camera Opt ###############
+
+    # Steps per image to evaluate the novel view synthesis
+    nvs_steps: int = 500
+    # Novel view synthesis evaluation pose learning rate
+    nvs_pose_lr: float = 1e-3
+    # Novel view synthesis evaluation pose regularization
+    nvs_pose_reg: float = 0.0
+    # Novel view synthesis evaluation pose learning rate decay
+    nvs_pose_lr_decay: float = 1e-2
+
+    ########### Appearance Opt ###############
 
     # Enable appearance optimization. (experimental)
     app_opt: bool = False
@@ -146,28 +216,40 @@ class Config:
     # Regularization for appearance optimization as weight decay
     app_opt_reg: float = 1e-6
 
+    ########### Depth Loss ###############
+
     # Enable depth loss. (experimental)
     depth_loss: bool = False
     # Weight for depth loss
     depth_lambda: float = 1e-2
+
+    ########### Logging ###############
 
     # Dump information to tensorboard every this steps
     tb_every: int = 100
     # Save training images to tensorboard
     tb_save_image: bool = False
 
-    # BAD-Gaussians: Number of virtual cameras
-    num_virtual_views: int = 10
-    # BAD-Gaussians: Number of control knots
-    num_control_knots: int = 2
+    ########### Scale Reg ###############
 
     # If enabled, a scale regularization introduced in PhysGauss (https://xpandora.github.io/PhysGaussian/) is used for reducing huge spikey gaussians.
     use_scale_regularization: bool = True
     # threshold of ratio of gaussian max to min scale before applying regularization loss from the PhysGaussian paper
     max_gauss_ratio: float = 10.0
 
+    ######################################
+
     def __post_init__(self):
-        self.grow_grad2d = self.grow_grad2d / self.num_virtual_views
+        if self.enable_mcmc:
+            print("MCMC enabled.")
+            self.scale_factor = self.scale_factor_mcmc
+            self.init_opa = self.init_opa_mcmc
+            self.init_scale = self.init_scale_mcmc
+            self.refine_start_iter = self.refine_start_iter_mcmc
+            self.refine_stop_iter = self.refine_stop_iter_mcmc
+            self.refine_every = self.refine_every_mcmc
+        else:
+            self.grow_grad2d = self.grow_grad2d / self.num_virtual_views
 
     def adjust_steps(self, factor: float):
         self.eval_steps = [int(i * factor) for i in self.eval_steps]
@@ -180,75 +262,7 @@ class Config:
         self.refine_every = int(self.refine_every * factor)
 
 
-def create_splats_with_optimizers(
-        parser: ColmapParser,
-        init_type: str = "sfm",
-        init_num_pts: int = 100_000,
-        init_extent: float = 3.0,
-        init_opacity: float = 0.1,
-        init_scale: float = 1.0,
-        scene_scale: float = 1.0,
-        sh_degree: int = 3,
-        sparse_grad: bool = False,
-        batch_size: int = 1,
-        feature_dim: Optional[int] = None,
-        device: str = "cuda",
-) -> Tuple[torch.nn.ParameterDict, torch.optim.Optimizer]:
-    if init_type == "sfm":
-        points = torch.from_numpy(parser.points).float()
-        rgbs = torch.from_numpy(parser.points_rgb / 255.0).float()
-    elif init_type == "random":
-        points = init_extent * scene_scale * (torch.rand((init_num_pts, 3)) * 2 - 1)
-        rgbs = torch.rand((init_num_pts, 3))
-    else:
-        raise ValueError("Please specify a correct init_type: sfm or random")
-
-    N = points.shape[0]
-    # Initialize the GS size to be the average dist of the 3 nearest neighbors
-    dist2_avg = (knn(points, 4)[:, 1:] ** 2).mean(dim=-1)  # [N,]
-    dist_avg = torch.sqrt(dist2_avg)
-    scales = torch.log(dist_avg * init_scale).unsqueeze(-1).repeat(1, 3)  # [N, 3]
-    quats = torch.rand((N, 4))  # [N, 4]
-    opacities = torch.logit(torch.full((N,), init_opacity))  # [N,]
-
-    params = [
-        # name, value, lr
-        ("means3d", torch.nn.Parameter(points), 1.6e-4 * scene_scale),
-        ("scales", torch.nn.Parameter(scales), 5e-3),
-        ("quats", torch.nn.Parameter(quats), 1e-3),
-        ("opacities", torch.nn.Parameter(opacities), 5e-2),
-    ]
-
-    if feature_dim is None:
-        # color is SH coefficients.
-        colors = torch.zeros((N, (sh_degree + 1) ** 2, 3))  # [N, K, 3]
-        colors[:, 0, :] = rgb_to_sh(rgbs)
-        params.append(("sh0", torch.nn.Parameter(colors[:, :1, :]), 2.5e-3))
-        params.append(("shN", torch.nn.Parameter(colors[:, 1:, :]), 2.5e-3 / 20))
-    else:
-        # features will be used for appearance and view-dependent shading
-        features = torch.rand(N, feature_dim)  # [N, feature_dim]
-        params.append(("features", torch.nn.Parameter(features), 2.5e-3))
-        colors = torch.logit(rgbs)  # [N, 3]
-        params.append(("colors", torch.nn.Parameter(colors), 2.5e-3))
-
-    splats = torch.nn.ParameterDict({n: v for n, v, _ in params}).to(device)
-    # Scale learning rate based on batch size, reference:
-    # https://www.cs.princeton.edu/~smalladi/blog/2024/01/22/SDEs-ScalingRules/
-    # Note that this would not make the training exactly equivalent, see
-    # https://arxiv.org/pdf/2402.18824v1
-    optimizers = [
-        (torch.optim.SparseAdam if sparse_grad else torch.optim.Adam)(
-            [{"params": splats[name], "lr": lr * math.sqrt(batch_size), "name": name}],
-            eps=1e-15 / math.sqrt(batch_size),
-            betas=(1 - batch_size * (1 - 0.9), 1 - batch_size * (1 - 0.999)),
-        )
-        for name, _, lr in params
-    ]
-    return splats, optimizers
-
-
-class Runner:
+class DeblurRunner(Runner):
     """Engine for training and testing."""
 
     def __init__(self, cfg: Config) -> None:
@@ -276,15 +290,22 @@ class Runner:
             data_dir=cfg.data_dir,
             factor=cfg.data_factor,
             normalize=True,
-            test_every=cfg.test_every,
+            scale_factor=cfg.scale_factor,
         )
-        self.trainset = Dataset(
-            self.parser,
-            split="train",
-            patch_size=cfg.patch_size,
-            load_depths=cfg.depth_loss,
-        )
-        self.valset = Dataset(self.parser, split="val")
+        if cfg.enable_hdr_deblur:
+            self.parser.test_every = 0
+            self.trainset = HdrDeblurNerfDataset(self.parser, split="all")
+            self.valset = None
+            self.testset = HdrDeblurNerfDataset(self.parser, split="test")
+        else:
+            self.trainset = Dataset(
+                self.parser,
+                split="train",
+                patch_size=cfg.patch_size,
+                load_depths=cfg.depth_loss,
+            )
+            self.valset = Dataset(self.parser, split="val")
+            self.testset = DeblurNerfDataset(self.parser, split="test")
         self.scene_scale = self.parser.scene_scale * 1.1 * cfg.global_scale
         print("Scene scale:", self.scene_scale)
 
@@ -304,7 +325,38 @@ class Runner:
             feature_dim=feature_dim,
             device=self.device,
         )
-        print("Model initialized. Number of GS:", len(self.splats["means3d"]))
+        print("Model initialized. Number of GS:", len(self.splats["means"]))
+
+        # Densification Strategy
+        if cfg.enable_mcmc:
+            self.strategy = MCMCStrategy(
+                verbose=True,
+                cap_max=cfg.cap_max,
+                noise_lr=cfg.noise_lr,
+                refine_start_iter=cfg.refine_start_iter,
+                refine_stop_iter=cfg.refine_stop_iter,
+                refine_every=cfg.refine_every,
+            )
+            self.strategy.check_sanity(self.splats, self.optimizers)
+            self.strategy_state = self.strategy.initialize_state()
+        else:
+            self.strategy = DefaultStrategy(
+                verbose=True,
+                scene_scale=self.scene_scale,
+                prune_opa=cfg.prune_opa,
+                grow_grad2d=cfg.grow_grad2d,
+                grow_scale3d=cfg.grow_scale3d,
+                prune_scale3d=cfg.prune_scale3d,
+                # refine_scale2d_stop_iter=4000,  # splatfacto behavior
+                refine_start_iter=cfg.refine_start_iter,
+                refine_stop_iter=cfg.refine_stop_iter,
+                reset_every=cfg.reset_every,
+                refine_every=cfg.refine_every,
+                absgrad=cfg.absgrad,
+                revised_opacity=cfg.revised_opacity,
+            )
+            self.strategy.check_sanity(self.splats, self.optimizers)
+            self.strategy_state = self.strategy.initialize_state()
 
         self.pose_optimizers = []
         if cfg.pose_opt:
@@ -313,7 +365,7 @@ class Runner:
                 cfg.num_control_knots,
                 cfg.num_virtual_views
             ).to(self.device)
-            self.pose_adjust.zero_init()
+            self.pose_adjust.random_init(cfg.pose_noise)
             self.pose_optimizers = [
                 torch.optim.Adam(
                     self.pose_adjust.parameters(),
@@ -321,10 +373,6 @@ class Runner:
                     weight_decay=cfg.pose_opt_reg,
                 )
             ]
-
-        if cfg.pose_noise > 0.0:
-            self.pose_perturb = CameraOptModule(len(self.trainset)).to(self.device)
-            self.pose_perturb.random_init(cfg.pose_noise)
 
         self.app_optimizers = []
         if cfg.app_opt:
@@ -356,18 +404,26 @@ class Runner:
         # Viewer
         if not self.cfg.disable_viewer:
             self.server = viser.ViserServer(port=cfg.port, verbose=False)
-            self.viewer = PoseViewer(
-                server=self.server,
-                render_fn=self._viewer_render_fn,
-                mode="training",
-            )
+            if cfg.visualize_cameras:
+                self.viewer = PoseViewer(
+                    server=self.server,
+                    render_fn=self._viewer_render_fn,
+                    mode="training",
+                )
+            else:
+                self.viewer = Viewer(
+                    server=self.server,
+                    render_fn=self._viewer_render_fn,
+                    mode="training",
+                )
 
-        # Running stats for prunning & growing.
-        n_gauss = len(self.splats["means3d"])
-        self.running_stats = {
-            "grad2d": torch.zeros(n_gauss, device=self.device),  # norm of the gradient
-            "count": torch.zeros(n_gauss, device=self.device, dtype=torch.int),
-        }
+        if not cfg.enable_mcmc:
+            # Running stats for prunning & growing.
+            n_gauss = len(self.splats["means"])
+            self.running_stats = {
+                "grad2d": torch.zeros(n_gauss, device=self.device),  # norm of the gradient
+                "count": torch.zeros(n_gauss, device=self.device, dtype=torch.int),
+            }
 
     def rasterize_splats(
             self,
@@ -377,7 +433,7 @@ class Runner:
             height: int,
             **kwargs,
     ) -> Tuple[Tensor, Tensor, Dict]:
-        means = self.splats["means3d"]  # [N, 3]
+        means = self.splats["means"]  # [N, 3]
         # quats = F.normalize(self.splats["quats"], dim=-1)  # [N, 4]
         # rasterization does normalization internally
         quats = self.splats["quats"]  # [N, 4]
@@ -428,16 +484,16 @@ class Runner:
         init_step = 0
 
         schedulers = [
-            # means3d has a learning rate schedule, that end at 0.01 of the initial value
+            # means has a learning rate schedule, that end at 0.01 of the initial value
             torch.optim.lr_scheduler.ExponentialLR(
-                self.optimizers[0], gamma=0.01 ** (1.0 / max_steps)
+                self.optimizers["means"], gamma=0.01 ** (1.0 / max_steps)
             ),
         ]
         if cfg.pose_opt:
             # pose optimization has a learning rate schedule
             pose_scheduler = torch.optim.lr_scheduler.ExponentialLR(
                 self.pose_optimizers[0],
-                gamma=pose_opt_lr_decay ** (1.0 / max_steps)
+                gamma=cfg.pose_opt_lr_decay ** (1.0 / max_steps)
             )
             schedulers.append(pose_scheduler)
 
@@ -451,7 +507,8 @@ class Runner:
         )
         trainloader_iter = iter(trainloader)
 
-        self._init_viewer_state()
+        if cfg.visualize_cameras:
+            self._init_viewer_state()
 
         # Training loop.
         global_tic = time.time()
@@ -481,9 +538,6 @@ class Runner:
                 depths_gt = data["depths"].to(device)  # [1, M]
 
             height, width = pixels.shape[1:3]
-
-            if cfg.pose_noise:
-                camtoworlds = self.pose_perturb(camtoworlds, image_ids)
 
             if cfg.pose_opt:
                 assert camtoworlds.shape[0] == 1
@@ -518,7 +572,14 @@ class Runner:
             # BAD-Gaussians: average the virtual views
             colors = colors.mean(0)[None]
 
-            info["means2d"].retain_grad()  # used for running stats
+            if not cfg.enable_mcmc:
+                self.strategy.step_pre_backward(
+                    params=self.splats,
+                    optimizers=self.optimizers,
+                    state=self.strategy_state,
+                    step=step,
+                    info=info,
+                )
 
             # loss
             l1loss = F.l1_loss(colors, pixels)
@@ -545,6 +606,17 @@ class Runner:
                 disp_gt = 1.0 / depths_gt  # [1, M]
                 depthloss = F.l1_loss(disp, disp_gt) * self.scene_scale
                 loss += depthloss * cfg.depth_lambda
+
+            if cfg.enable_mcmc:
+                loss = (
+                        loss
+                        + cfg.opacity_reg
+                        * torch.abs(torch.sigmoid(self.splats["opacities"])).mean()
+                )
+                loss = (
+                        loss
+                        + cfg.scale_reg * torch.abs(torch.exp(self.splats["scales"])).mean()
+                )
 
             if cfg.use_scale_regularization and step % 10 == 0:
                 scale_exp = torch.exp(self.splats["scales"])
@@ -577,7 +649,7 @@ class Runner:
                 self.writer.add_scalar("train/l1loss", l1loss.item(), step)
                 self.writer.add_scalar("train/ssimloss", ssimloss.item(), step)
                 self.writer.add_scalar(
-                    "train/num_GS", len(self.splats["means3d"]), step
+                    "train/num_GS", len(self.splats["means"]), step
                 )
                 self.writer.add_scalar("train/mem", mem, step)
                 # monitor pose learning rate
@@ -598,67 +670,26 @@ class Runner:
                     canvas = torch.cat([pixels, colors], dim=2).detach().cpu().numpy()
                     canvas = canvas.reshape(-1, *canvas.shape[2:])
                     self.writer.add_image("train/render", canvas, step)
-
                 self.writer.flush()
 
-            # update running stats for prunning & growing
-            if step < cfg.refine_stop_iter:
-                self.update_running_stats(info)
-
-                if step > cfg.refine_start_iter and step % cfg.refine_every == 0:
-                    grads = self.running_stats["grad2d"] / self.running_stats[
-                        "count"
-                    ].clamp_min(1)
-
-                    # grow GSs
-                    is_grad_high = grads >= cfg.grow_grad2d
-                    is_small = (
-                            torch.exp(self.splats["scales"]).max(dim=-1).values
-                            <= cfg.grow_scale3d * self.scene_scale
-                    )
-                    is_dupli = is_grad_high & is_small
-                    n_dupli = is_dupli.sum().item()
-                    self.refine_duplicate(is_dupli)
-
-                    is_split = is_grad_high & ~is_small
-                    is_split = torch.cat(
-                        [
-                            is_split,
-                            # new GSs added by duplication will not be split
-                            torch.zeros(n_dupli, device=device, dtype=torch.bool),
-                        ]
-                    )
-                    n_split = is_split.sum().item()
-                    self.refine_split(is_split)
-                    print(
-                        f"Step {step}: {n_dupli} GSs duplicated, {n_split} GSs split. "
-                        f"Now having {len(self.splats['means3d'])} GSs."
-                    )
-
-                    # prune GSs
-                    is_prune = torch.sigmoid(self.splats["opacities"]) < cfg.prune_opa
-                    if step > cfg.reset_every:
-                        # The official code also implements sreen-size pruning but
-                        # it's actually not being used due to a bug:
-                        # https://github.com/graphdeco-inria/gaussian-splatting/issues/123
-                        is_too_big = (
-                                torch.exp(self.splats["scales"]).max(dim=-1).values
-                                > cfg.prune_scale3d * self.scene_scale
-                        )
-                        is_prune = is_prune | is_too_big
-                    n_prune = is_prune.sum().item()
-                    self.refine_keep(~is_prune)
-                    print(
-                        f"Step {step}: {n_prune} GSs pruned. "
-                        f"Now having {len(self.splats['means3d'])} GSs."
-                    )
-
-                    # reset running stats
-                    self.running_stats["grad2d"].zero_()
-                    self.running_stats["count"].zero_()
-
-                if step % cfg.reset_every == 0:
-                    self.reset_opa(cfg.prune_opa * 2.0)
+            if cfg.enable_mcmc:
+                self.strategy.step_post_backward(
+                    params=self.splats,
+                    optimizers=self.optimizers,
+                    state=self.strategy_state,
+                    step=step,
+                    info=info,
+                    lr=schedulers[0].get_last_lr()[0],
+                )
+            else:
+                self.strategy.step_post_backward(
+                    params=self.splats,
+                    optimizers=self.optimizers,
+                    state=self.strategy_state,
+                    step=step,
+                    info=info,
+                    packed=cfg.packed,
+                )
 
             # Turn Gradients into Sparse Tensor before running optimizer
             if cfg.sparse_grad:
@@ -676,7 +707,7 @@ class Runner:
                     )
 
             # optimize
-            for optimizer in self.optimizers:
+            for optimizer in self.optimizers.values():
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
             for optimizer in self.pose_optimizers:
@@ -696,7 +727,7 @@ class Runner:
                 stats = {
                     "mem": mem,
                     "ellipse_time": time.time() - global_tic,
-                    "num_GS": len(self.splats["means3d"]),
+                    "num_GS": len(self.splats["means"]),
                 }
                 print("Step: ", step, stats)
                 with open(f"{self.stats_dir}/train_step{step:04d}.json", "w") as f:
@@ -705,13 +736,16 @@ class Runner:
                     {
                         "step": step,
                         "splats": self.splats.state_dict(),
+                        "camera_opt": self.pose_adjust.state_dict(),
                     },
                     f"{self.ckpt_dir}/ckpt_{step}.pt",
                 )
 
             # eval the full set
             if step in [i - 1 for i in cfg.eval_steps] or step == max_steps - 1:
-                self.eval(step)
+                self.eval_deblur(step)
+                if self.valset is not None:
+                    self.eval_novel_view(step)
                 self.render_traj(step)
 
             if not cfg.disable_viewer:
@@ -726,171 +760,18 @@ class Runner:
                 self.viewer.update(step, num_train_rays_per_step)
 
     @torch.no_grad()
-    def update_running_stats(self, info: Dict):
-        """Update running stats."""
-        cfg = self.cfg
-
-        # normalize grads to [-1, 1] screen space
-        if cfg.absgrad:
-            grads = info["means2d"].absgrad.clone()
-        else:
-            grads = info["means2d"].grad.clone()
-        grads[..., 0] *= info["width"] / 2.0 * cfg.batch_size
-        grads[..., 1] *= info["height"] / 2.0 * cfg.batch_size
-        if cfg.packed:
-            # grads is [nnz, 2]
-            gs_ids = info["gaussian_ids"]  # [nnz] or None
-            self.running_stats["grad2d"].index_add_(0, gs_ids, grads.norm(dim=-1))
-            self.running_stats["count"].index_add_(
-                0, gs_ids, torch.ones_like(gs_ids).int()
-            )
-        else:
-            # grads is [C, N, 2]
-            sel = info["radii"] > 0.0  # [C, N]
-            gs_ids = torch.where(sel)[1]  # [nnz]
-            self.running_stats["grad2d"].index_add_(0, gs_ids, grads[sel].norm(dim=-1))
-            self.running_stats["count"].index_add_(
-                0, gs_ids, torch.ones_like(gs_ids).int()
-            )
-
-    @torch.no_grad()
-    def reset_opa(self, value: float = 0.01):
-        """Utility function to reset opacities."""
-        opacities = torch.clamp(
-            self.splats["opacities"], max=torch.logit(torch.tensor(value)).item()
-        )
-        for optimizer in self.optimizers:
-            for i, param_group in enumerate(optimizer.param_groups):
-                if param_group["name"] != "opacities":
-                    continue
-                p = param_group["params"][0]
-                p_state = optimizer.state[p]
-                del optimizer.state[p]
-                for key in p_state.keys():
-                    if key != "step":
-                        p_state[key] = torch.zeros_like(p_state[key])
-                p_new = torch.nn.Parameter(opacities)
-                optimizer.param_groups[i]["params"] = [p_new]
-                optimizer.state[p_new] = p_state
-                self.splats[param_group["name"]] = p_new
-        torch.cuda.empty_cache()
-
-    @torch.no_grad()
-    def refine_split(self, mask: Tensor):
-        """Utility function to grow GSs."""
-        device = self.device
-
-        sel = torch.where(mask)[0]
-        rest = torch.where(~mask)[0]
-
-        scales = torch.exp(self.splats["scales"][sel])  # [N, 3]
-        quats = F.normalize(self.splats["quats"][sel], dim=-1)  # [N, 4]
-        rotmats = normalized_quat_to_rotmat(quats)  # [N, 3, 3]
-        samples = torch.einsum(
-            "nij,nj,bnj->bni",
-            rotmats,
-            scales,
-            torch.randn(2, len(scales), 3, device=device),
-        )  # [2, N, 3]
-
-        for optimizer in self.optimizers:
-            for i, param_group in enumerate(optimizer.param_groups):
-                p = param_group["params"][0]
-                name = param_group["name"]
-                # create new params
-                if name == "means3d":
-                    p_split = (p[sel] + samples).reshape(-1, 3)  # [2N, 3]
-                elif name == "scales":
-                    p_split = torch.log(scales / 1.6).repeat(2, 1)  # [2N, 3]
-                else:
-                    repeats = [2] + [1] * (p.dim() - 1)
-                    p_split = p[sel].repeat(repeats)
-                p_new = torch.cat([p[rest], p_split])
-                p_new = torch.nn.Parameter(p_new)
-                # update optimizer
-                p_state = optimizer.state[p]
-                del optimizer.state[p]
-                for key in p_state.keys():
-                    if key == "step":
-                        continue
-                    v = p_state[key]
-                    # new params are assigned with zero optimizer states
-                    # (worth investigating it)
-                    v_split = torch.zeros((2 * len(sel), *v.shape[1:]), device=device)
-                    p_state[key] = torch.cat([v[rest], v_split])
-                optimizer.param_groups[i]["params"] = [p_new]
-                optimizer.state[p_new] = p_state
-                self.splats[name] = p_new
-        for k, v in self.running_stats.items():
-            if v is None:
-                continue
-            repeats = [2] + [1] * (v.dim() - 1)
-            v_new = v[sel].repeat(repeats)
-            self.running_stats[k] = torch.cat((v[rest], v_new))
-        torch.cuda.empty_cache()
-
-    @torch.no_grad()
-    def refine_duplicate(self, mask: Tensor):
-        """Unility function to duplicate GSs."""
-        sel = torch.where(mask)[0]
-        for optimizer in self.optimizers:
-            for i, param_group in enumerate(optimizer.param_groups):
-                p = param_group["params"][0]
-                name = param_group["name"]
-                p_state = optimizer.state[p]
-                del optimizer.state[p]
-                for key in p_state.keys():
-                    if key != "step":
-                        # new params are assigned with zero optimizer states
-                        # (worth investigating it as it will lead to a lot more GS.)
-                        v = p_state[key]
-                        v_new = torch.zeros(
-                            (len(sel), *v.shape[1:]), device=self.device
-                        )
-                        # v_new = v[sel]
-                        p_state[key] = torch.cat([v, v_new])
-                p_new = torch.nn.Parameter(torch.cat([p, p[sel]]))
-                optimizer.param_groups[i]["params"] = [p_new]
-                optimizer.state[p_new] = p_state
-                self.splats[name] = p_new
-        for k, v in self.running_stats.items():
-            self.running_stats[k] = torch.cat((v, v[sel]))
-        torch.cuda.empty_cache()
-
-    @torch.no_grad()
-    def refine_keep(self, mask: Tensor):
-        """Unility function to prune GSs."""
-        sel = torch.where(mask)[0]
-        for optimizer in self.optimizers:
-            for i, param_group in enumerate(optimizer.param_groups):
-                p = param_group["params"][0]
-                name = param_group["name"]
-                p_state = optimizer.state[p]
-                del optimizer.state[p]
-                for key in p_state.keys():
-                    if key != "step":
-                        p_state[key] = p_state[key][sel]
-                p_new = torch.nn.Parameter(p[sel])
-                optimizer.param_groups[i]["params"] = [p_new]
-                optimizer.state[p_new] = p_state
-                self.splats[name] = p_new
-        for k, v in self.running_stats.items():
-            self.running_stats[k] = v[sel]
-        torch.cuda.empty_cache()
-
-    @torch.no_grad()
-    def eval(self, step: int):
+    def eval_deblur(self, step: int):
         """Entry for evaluation."""
         print("Running evaluation...")
         cfg = self.cfg
         device = self.device
 
-        valloader = torch.utils.data.DataLoader(
-            self.valset, batch_size=1, shuffle=False, num_workers=1
+        testloader = torch.utils.data.DataLoader(
+            self.testset, batch_size=1, shuffle=False, num_workers=1
         )
         ellipse_time = 0
         metrics = {"psnr": [], "ssim": [], "lpips": []}
-        for i, data in enumerate(valloader):
+        for i, data in enumerate(testloader):
             camtoworlds = data["camtoworld"].to(device)
             Ks = data["K"].to(device)
             pixels = data["image"].to(device) / 255.0
@@ -918,7 +799,7 @@ class Runner:
             # write images
             canvas = torch.cat([pixels, colors], dim=2).squeeze(0).cpu().numpy()
             imageio.imwrite(
-                f"{self.render_dir}/val_{i:04d}.png", (canvas * 255).astype(np.uint8)
+                f"{self.render_dir}/{step:04d}_deblur_{i:04d}.png", (canvas * 255).astype(np.uint8)
             )
 
             pixels = pixels.permute(0, 3, 1, 2)  # [1, 3, H, W]
@@ -927,15 +808,16 @@ class Runner:
             metrics["ssim"].append(self.ssim(colors, pixels))
             metrics["lpips"].append(self.lpips(colors, pixels))
 
-        ellipse_time /= len(valloader)
+        ellipse_time /= len(testloader)
 
         psnr = torch.stack(metrics["psnr"]).mean()
         ssim = torch.stack(metrics["ssim"]).mean()
         lpips = torch.stack(metrics["lpips"]).mean()
         print(
+            f"Deblurring at Step_{step:04d}:"
             f"PSNR: {psnr.item():.3f}, SSIM: {ssim.item():.4f}, LPIPS: {lpips.item():.3f} "
             f"Time: {ellipse_time:.3f}s/image "
-            f"Number of GS: {len(self.splats['means3d'])}"
+            f"Number of GS: {len(self.splats['means'])}"
         )
         # save stats as json
         stats = {
@@ -943,14 +825,133 @@ class Runner:
             "ssim": ssim.item(),
             "lpips": lpips.item(),
             "ellipse_time": ellipse_time,
-            "num_GS": len(self.splats["means3d"]),
+            "num_GS": len(self.splats["means"]),
         }
-        with open(f"{self.stats_dir}/val_step{step:04d}.json", "w") as f:
+        with open(f"{self.stats_dir}/deblur_step{step:04d}.json", "w") as f:
             json.dump(stats, f)
         # save stats to tensorboard
         for k, v in stats.items():
-            self.writer.add_scalar(f"val/{k}", v, step)
+            self.writer.add_scalar(f"deblur/{k}", v, step)
         self.writer.flush()
+
+    def eval_novel_view(self, step: int):
+        """Entry for evaluation."""
+        print("Running evaluation...")
+        cfg = self.cfg
+        device = self.device
+
+        valloader = torch.utils.data.DataLoader(
+            self.valset, batch_size=1, shuffle=False, num_workers=1
+        )
+
+        # Freeze the scene
+        for optimizer in self.optimizers.values():
+            for param_group in optimizer.param_groups:
+                param_group["params"][0].requires_grad = False
+
+        metrics = {"psnr": [], "ssim": [], "lpips": []}
+        for i, data in enumerate(valloader):
+            camtoworlds = data["camtoworld"].to(device)
+            Ks = data["K"].to(device)
+            pixels = data["image"].to(device) / 255.0  # [1, H, W, 3]
+            height, width = pixels.shape[1:3]
+            image_ids = data["image_id"].to(device)
+
+            pixels_ = pixels.permute(0, 3, 1, 2)  # [1, 3, H, W]
+
+            novel_view_pose_adjust = CameraOptModuleSE3(1).to(self.device)
+            novel_view_pose_adjust.random_init(cfg.pose_noise)
+            novel_view_pose_optimizer = torch.optim.Adam(
+                novel_view_pose_adjust.parameters(),
+                lr=cfg.nvs_pose_lr * math.sqrt(cfg.batch_size),
+                weight_decay=cfg.nvs_pose_reg,
+                eps=1e-15,
+            )
+
+            scheduler = torch.optim.lr_scheduler.ExponentialLR(
+                novel_view_pose_optimizer,
+                gamma=cfg.pose_opt_lr_decay ** (1.0 / cfg.max_steps)
+            )
+
+            for j in range(cfg.nvs_steps):
+                camtoworlds_new = novel_view_pose_adjust(camtoworlds, torch.tensor([0]).to(self.device))
+                colors, alphas, info = self.rasterize_splats(
+                    camtoworlds=camtoworlds_new,
+                    Ks=Ks,
+                    width=width,
+                    height=height,
+                    sh_degree=cfg.sh_degree,
+                    near_plane=cfg.near_plane,
+                    far_plane=cfg.far_plane,
+                    image_ids=image_ids,
+                    render_mode="RGB",
+                )
+                # colors = torch.clamp(colors, 0.0, 1.0)
+                colors_ = colors.permute(0, 3, 1, 2)  # [1, 3, H, W]
+
+                # loss
+                l1loss = F.l1_loss(colors, pixels)
+                ssimloss = 1.0 - self.ssim(colors_, pixels_)
+                loss = l1loss * (1.0 - cfg.ssim_lambda) + ssimloss * cfg.ssim_lambda
+
+                loss.backward()
+
+                novel_view_pose_optimizer.step()
+                novel_view_pose_optimizer.zero_grad(set_to_none=True)
+
+                scheduler.step()
+                with torch.no_grad():
+                    if j % 20 == 0:
+                        colors_ = torch.clamp(colors_, 0.0, 1.0)
+                        psnr = self.psnr(colors_.detach(), pixels_)
+                        ssim = self.ssim(colors_, pixels_)
+                        lpips = self.lpips(colors_.detach(), pixels_)
+                        print(
+                            f"NVS eval at Step_{step:04d}:"
+                            f"NVS_IMG_#{i:04d}_step_{j:04d}:"
+                            f"PSNR: {psnr.item():.3f}, SSIM: {ssim.item():.4f}, LPIPS: {lpips.item():.3f} "
+                        )
+                        metrics["psnr"].append(psnr)
+                        metrics["ssim"].append(ssim)
+                        metrics["lpips"].append(lpips)
+
+                        # # NVS Debugging
+                        # stats = {
+                        #     "psnr": psnr.item(),
+                        #     "ssim": ssim.item(),
+                        #     "lpips": lpips.item(),
+                        # }
+                        # for k, v in stats.items():
+                        #     self.writer.add_scalar(f"nvs/{step}/{i}/{k}", v, j)
+                        # self.writer.add_scalar(f"nvs/{step}/{i}/pose_lr", scheduler.get_last_lr()[0], j)
+                        # self.writer.add_scalar(f"nvs/{step}/{i}/camera_opt_translation", novel_view_pose_adjust.poses_opt[:, :3].mean(), j)
+                        # self.writer.add_scalar(f"nvs/{step}/{i}/camera_opt_rotation", novel_view_pose_adjust.poses_opt[:, 3:].mean(), j)
+                        # self.writer.flush()
+                        # # write images
+                        # canvas = torch.cat([pixels, colors], dim=2).squeeze(0).detach().cpu().numpy()
+                        # imageio.imwrite(
+                        #     f"{self.render_dir}/{step:04d}_nvs_{i:04d}_{j:04d}.png", (canvas * 255).astype(np.uint8)
+                        # )
+        psnr = torch.stack(metrics["psnr"]).mean()
+        ssim = torch.stack(metrics["ssim"]).mean()
+        lpips = torch.stack(metrics["lpips"]).mean()
+        # save stats as json
+        stats = {
+            "psnr": psnr.item(),
+            "ssim": ssim.item(),
+            "lpips": lpips.item(),
+        }
+        with open(f"{self.stats_dir}/nvs_step{step:04d}.json", "w") as f:
+            json.dump(stats, f)
+        # save stats to tensorboard
+        for k, v in stats.items():
+            self.writer.add_scalar(f"nvs/{k}", v, step)
+        self.writer.flush()
+
+        # Unfreeze the scene
+        for optimizer in self.optimizers.values():
+            for param_group in optimizer.param_groups:
+                param_group["params"][0].requires_grad = True
 
     @torch.no_grad()
     def render_traj(self, step: int):
@@ -1005,27 +1006,6 @@ class Runner:
         writer.close()
         print(f"Video saved to {video_dir}/traj_{step}.mp4")
 
-    @torch.no_grad()
-    def _viewer_render_fn(
-            self, camera_state: nerfview.CameraState, img_wh: Tuple[int, int]
-    ):
-        """Callable function for the viewer."""
-        W, H = img_wh
-        c2w = camera_state.c2w
-        K = camera_state.get_K(img_wh)
-        c2w = torch.from_numpy(c2w).float().to(self.device)
-        K = torch.from_numpy(K).float().to(self.device)
-
-        render_colors, _, _ = self.rasterize_splats(
-            camtoworlds=c2w[None],
-            Ks=K[None],
-            width=W,
-            height=H,
-            sh_degree=self.cfg.sh_degree,  # active all SH degrees
-            radius_clip=3.0,  # skip GSs that have small image radius (in pixels)
-        )  # [1, H, W, 3]
-        return render_colors[0].cpu().numpy()
-
     def _init_viewer_state(self) -> None:
         """Initializes viewer scene with given train dataset"""
         if not cfg.disable_viewer:
@@ -1034,14 +1014,17 @@ class Runner:
 
 
 def main(cfg: Config):
-    runner = Runner(cfg)
+    runner = DeblurRunner(cfg)
 
     if cfg.ckpt is not None:
         # run eval only
         ckpt = torch.load(cfg.ckpt, map_location=runner.device)
         for k in runner.splats.keys():
-            runner.splats[k].data = ckpt["splats"][k]
-        runner.eval(step=ckpt["step"])
+            runner.splats[k].data = ckpt["splats"][k].detach().to(runner.device)
+            runner.pose_adjust.embeds.weight.data = ckpt["camera_opt"]["embeds.weight"].detach().to(runner.device)
+        runner.eval_deblur(step=ckpt["step"])
+        if runner.valset is not None:
+            runner.eval_novel_view(step=ckpt["step"])
         runner.render_traj(step=ckpt["step"])
     else:
         runner.train()
