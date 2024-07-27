@@ -119,16 +119,16 @@ class ColmapParser:
                 params = np.empty(0, dtype=np.float32)
                 camtype = "perspective"
             if type_ == 2 or type_ == "SIMPLE_RADIAL":
-                params = np.array([cam.k1], dtype=np.float32)
+                params = np.array([cam["k1"]], dtype=np.float32)
                 camtype = "perspective"
             elif type_ == 3 or type_ == "RADIAL":
-                params = np.array([cam.k1, cam.k2, 0.0, 0.0], dtype=np.float32)
+                params = np.array([cam["k1"], cam["k2"], 0.0, 0.0], dtype=np.float32)
                 camtype = "perspective"
             elif type_ == 4 or type_ == "OPENCV":
-                params = np.array([cam.k1, cam.k2, cam.p1, cam.p2], dtype=np.float32)
+                params = np.array([cam["k1"], cam["k2"], cam["p1"], cam["p2"]], dtype=np.float32)
                 camtype = "perspective"
             elif type_ == 5 or type_ == "OPENCV_FISHEYE":
-                params = np.array([cam.k1, cam.k2, cam.k3, cam.k4], dtype=np.float32)
+                params = np.array([cam["k1"], cam["k2"], cam["k3"], cam["k4"]], dtype=np.float32)
                 camtype = "fisheye"
             assert (
                 camtype == "perspective"

@@ -21,10 +21,12 @@ from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 from datasets.colmap import Dataset
 from datasets.colmap_dataparser import ColmapParser
 from datasets.deblur_nerf import DeblurNerfDataset
+from datasets.hdr_deblur_nerf import HdrDeblurNerfDataset
 from datasets.traj import generate_interpolated_path
 from gsplat.rendering import rasterization
 from gsplat.strategy import DefaultStrategy, MCMCStrategy
 from pose_viewer import PoseViewer
+from nerfview.viewer import Viewer
 from simple_trainer import create_splats_with_optimizers, Runner
 from utils import (
     AppearanceOptModule,
@@ -38,22 +40,27 @@ from utils import (
 class Config:
     # Disable viewer
     disable_viewer: bool = False
+    # Visualize cameras in viewer
+    visualize_cameras: bool = False
+
     # Path to the .pt file. If provide, it will skip training and render a video
     # ckpt: Optional[str] = "results/tanabata_mcmc_500k_grad25/ckpts/ckpt_29999.pt"
     ckpt: Optional[str] = None
 
     # Path to the Mip-NeRF 360 dataset
     # data_dir: str = "data/360_v2/garden"
-    data_dir: str = "/datasets/bad-gaussian/data/bad-nerf-gtK-colmap-nvs/blurtanabata"
+    # data_dir: str = "/datasets/bad-gaussian/data/bad-nerf-gtK-colmap-nvs/blurtanabata"
+    data_dir: str = "/datasets/HDR-Bad-Gaussian/images_ns_process"
     # Downsample factor for the dataset
-    data_factor: int = 1
+    data_factor: int = 4
     # How much to scale the camera origins by. Default: 0.25 for LLFF scenes.
     scale_factor: float = 0.25
     # Directory to save results
     # result_dir: str = "results/garden_vanilla"
     # result_dir: str = "results/tanabata_vanilla"
-    result_dir: str = "results/tanabata_mcmc_500k_grad25"
+    # result_dir: str = "results/tanabata_mcmc_500k_grad25"
     # result_dir: str = "results/tanabata_den4e-4_grad25_absgrad"
+    result_dir: str = "results/hdr_ikun_mcmc_test"
     # Every N images there is a test image
     test_every: int = 8
     # Random crop size for training  (experimental)
@@ -93,6 +100,18 @@ class Config:
     near_plane: float = 0.01
     # Far plane clipping distance
     far_plane: float = 1e10
+
+    ########### Motion Deblur ###############
+
+    # BAD-Gaussians: Number of virtual cameras
+    num_virtual_views: int = 10
+    # BAD-Gaussians: Number of control knots
+    num_control_knots: int = 2
+
+    ########### HDR ###############
+
+    # Read HDR Deblur-NeRF Dataset
+    enable_hdr_deblur: bool = True
 
     ###### MCMC parameters ######
 
@@ -211,13 +230,6 @@ class Config:
     # Save training images to tensorboard
     tb_save_image: bool = False
 
-    ########### Motion Deblur ###############
-
-    # BAD-Gaussians: Number of virtual cameras
-    num_virtual_views: int = 10
-    # BAD-Gaussians: Number of control knots
-    num_control_knots: int = 2
-
     ########### Scale Reg ###############
 
     # If enabled, a scale regularization introduced in PhysGauss (https://xpandora.github.io/PhysGaussian/) is used for reducing huge spikey gaussians.
@@ -280,14 +292,20 @@ class DeblurRunner(Runner):
             normalize=True,
             scale_factor=cfg.scale_factor,
         )
-        self.trainset = Dataset(
-            self.parser,
-            split="train",
-            patch_size=cfg.patch_size,
-            load_depths=cfg.depth_loss,
-        )
-        self.valset = Dataset(self.parser, split="val")
-        self.testset = DeblurNerfDataset(self.parser, split="test")
+        if cfg.enable_hdr_deblur:
+            self.parser.test_every = 0
+            self.trainset = HdrDeblurNerfDataset(self.parser, split="all")
+            self.valset = None
+            self.testset = HdrDeblurNerfDataset(self.parser, split="test")
+        else:
+            self.trainset = Dataset(
+                self.parser,
+                split="train",
+                patch_size=cfg.patch_size,
+                load_depths=cfg.depth_loss,
+            )
+            self.valset = Dataset(self.parser, split="val")
+            self.testset = DeblurNerfDataset(self.parser, split="test")
         self.scene_scale = self.parser.scene_scale * 1.1 * cfg.global_scale
         print("Scene scale:", self.scene_scale)
 
@@ -386,11 +404,18 @@ class DeblurRunner(Runner):
         # Viewer
         if not self.cfg.disable_viewer:
             self.server = viser.ViserServer(port=cfg.port, verbose=False)
-            self.viewer = PoseViewer(
-                server=self.server,
-                render_fn=self._viewer_render_fn,
-                mode="training",
-            )
+            if cfg.visualize_cameras:
+                self.viewer = PoseViewer(
+                    server=self.server,
+                    render_fn=self._viewer_render_fn,
+                    mode="training",
+                )
+            else:
+                self.viewer = Viewer(
+                    server=self.server,
+                    render_fn=self._viewer_render_fn,
+                    mode="training",
+                )
 
         if not cfg.enable_mcmc:
             # Running stats for prunning & growing.
@@ -482,7 +507,8 @@ class DeblurRunner(Runner):
         )
         trainloader_iter = iter(trainloader)
 
-        self._init_viewer_state()
+        if cfg.visualize_cameras:
+            self._init_viewer_state()
 
         # Training loop.
         global_tic = time.time()
@@ -718,7 +744,8 @@ class DeblurRunner(Runner):
             # eval the full set
             if step in [i - 1 for i in cfg.eval_steps] or step == max_steps - 1:
                 self.eval_deblur(step)
-                self.eval_novel_view(step)
+                if self.valset is not None:
+                    self.eval_novel_view(step)
                 self.render_traj(step)
 
             if not cfg.disable_viewer:
@@ -979,27 +1006,6 @@ class DeblurRunner(Runner):
         writer.close()
         print(f"Video saved to {video_dir}/traj_{step}.mp4")
 
-    @torch.no_grad()
-    def _viewer_render_fn(
-            self, camera_state: nerfview.CameraState, img_wh: Tuple[int, int]
-    ):
-        """Callable function for the viewer."""
-        W, H = img_wh
-        c2w = camera_state.c2w
-        K = camera_state.get_K(img_wh)
-        c2w = torch.from_numpy(c2w).float().to(self.device)
-        K = torch.from_numpy(K).float().to(self.device)
-
-        render_colors, _, _ = self.rasterize_splats(
-            camtoworlds=c2w[None],
-            Ks=K[None],
-            width=W,
-            height=H,
-            sh_degree=self.cfg.sh_degree,  # active all SH degrees
-            radius_clip=3.0,  # skip GSs that have small image radius (in pixels)
-        )  # [1, H, W, 3]
-        return render_colors[0].cpu().numpy()
-
     def _init_viewer_state(self) -> None:
         """Initializes viewer scene with given train dataset"""
         if not cfg.disable_viewer:
@@ -1017,7 +1023,8 @@ def main(cfg: Config):
             runner.splats[k].data = ckpt["splats"][k].detach().to(runner.device)
             runner.pose_adjust.embeds.weight.data = ckpt["camera_opt"]["embeds.weight"].detach().to(runner.device)
         runner.eval_deblur(step=ckpt["step"])
-        runner.eval_novel_view(step=ckpt["step"])
+        if runner.valset is not None:
+            runner.eval_novel_view(step=ckpt["step"])
         runner.render_traj(step=ckpt["step"])
     else:
         runner.train()

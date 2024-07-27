@@ -1,6 +1,4 @@
 import random
-from typing import Literal
-from typing_extensions import assert_never
 
 import numpy as np
 import pypose as pp
@@ -8,10 +6,11 @@ import torch
 import torch.nn.functional as F
 from sklearn.neighbors import NearestNeighbors
 from torch import Tensor
+from typing_extensions import assert_never
 
-from spline_function import linear_interpolation, linear_interpolation_mid, cubic_bspline_interpolation, bezier_interpolation
-
-TrajSamplingMode = Literal["uniform", "mid"]
+from badgs.camera_trajectory import TrajSamplingMode
+from badgs.spline_functor import linear_interpolation, linear_interpolation_mid, cubic_bspline_interpolation, \
+    bezier_interpolation
 
 
 class BadCameraOptModule(torch.nn.Module):
@@ -78,7 +77,8 @@ class BadCameraOptModule(torch.nn.Module):
 class PoseOptModule(torch.nn.Module):
     """Camera pose optimization module w/ Bezier curve"""
 
-    def __init__(self, camera_to_worlds, traj_mode='bezier', bezier_degree=10, initial_noise=1e-5, pose_refine=False, pose_noise=0):
+    def __init__(self, camera_to_worlds, traj_mode='bezier', bezier_degree=10, initial_noise=1e-5, pose_refine=False,
+                 pose_noise=0):
         super().__init__()
         self.pose_refine = pose_refine
         self.num_views = camera_to_worlds.shape[0]
@@ -86,9 +86,9 @@ class PoseOptModule(torch.nn.Module):
 
         if not pose_refine:
             if traj_mode == 'bezier':
-                poses_control_knots_SE3 = pp.mat2SE3(camera_to_worlds, check=False) # NOTE: hack for now
-                poses_control_knots_SE3_mid = poses_control_knots_SE3[self.num_views//2]
-                poses_control_knots_SE3 = poses_control_knots_SE3_mid.unsqueeze(0).repeat(bezier_degree,1).unsqueeze(0)
+                poses_control_knots_SE3 = pp.mat2SE3(camera_to_worlds, check=False)  # NOTE: hack for now
+                poses_control_knots_SE3_mid = poses_control_knots_SE3[self.num_views // 2]
+                poses_control_knots_SE3 = poses_control_knots_SE3_mid.unsqueeze(0).repeat(bezier_degree, 1).unsqueeze(0)
                 poses_control_knots_se3 = poses_control_knots_SE3.Log()
 
                 poses_noise_se3 = pp.randn_se3(1, bezier_degree, sigma=initial_noise)
@@ -96,10 +96,10 @@ class PoseOptModule(torch.nn.Module):
 
                 self.pose_control_knots = pp.Parameter(poses_control_knots_se3)
             elif traj_mode == 'individual':
-                poses_control_knots_SE3 = pp.mat2SE3(camera_to_worlds, check=False) # NOTE: hack for now
-                poses_control_knots_SE3_mid = poses_control_knots_SE3[self.num_views//2]
+                poses_control_knots_SE3 = pp.mat2SE3(camera_to_worlds, check=False)  # NOTE: hack for now
+                poses_control_knots_SE3_mid = poses_control_knots_SE3[self.num_views // 2]
 
-                poses_control_knots_SE3 = poses_control_knots_SE3_mid.unsqueeze(0).repeat(self.num_views,1)
+                poses_control_knots_SE3 = poses_control_knots_SE3_mid.unsqueeze(0).repeat(self.num_views, 1)
                 poses_control_knots_se3 = poses_control_knots_SE3.Log()
 
                 poses_noise_se3 = pp.randn_se3(self.num_views, sigma=initial_noise)
@@ -108,7 +108,7 @@ class PoseOptModule(torch.nn.Module):
                 self.pose_control_knots = pp.Parameter(poses_control_knots_se3)
 
         else:
-            poses_control_knots_SE3 = pp.mat2SE3(camera_to_worlds, check=False) # NOTE: hack for now
+            poses_control_knots_SE3 = pp.mat2SE3(camera_to_worlds, check=False)  # NOTE: hack for now
             poses_control_knots_se3 = poses_control_knots_SE3.Log()
             poses_noise_se3 = pp.randn_se3(self.num_views, sigma=pose_noise)
             poses_control_knots_se3 += poses_noise_se3
@@ -120,7 +120,7 @@ class PoseOptModule(torch.nn.Module):
 
                 u = torch.linspace(start=0, end=1, steps=self.num_views, device=self.pose_control_knots.device)
                 poses = bezier_interpolation(self.pose_control_knots.Exp(), u)
-                poses = poses.matrix()[0] # (N, 4, 4)
+                poses = poses.matrix()[0]  # (N, 4, 4)
 
             elif self.traj_mode == 'individual':
 
@@ -130,6 +130,7 @@ class PoseOptModule(torch.nn.Module):
             poses = self.pose_control_knots.matrix()
 
         return poses
+
 
 class CameraOptModuleSE3(torch.nn.Module):
     """Camera pose optimization module."""
@@ -161,6 +162,7 @@ class CameraOptModuleSE3(torch.nn.Module):
 
         transform = (pose_deltas).Exp().matrix()
         return torch.matmul(camtoworlds, transform)
+
 
 class CameraOptModule(torch.nn.Module):
     """Camera pose optimization module."""
@@ -205,13 +207,13 @@ class AppearanceOptModule(torch.nn.Module):
     """Appearance optimization module."""
 
     def __init__(
-        self,
-        n: int,
-        feature_dim: int,
-        embed_dim: int = 16,
-        sh_degree: int = 3,
-        mlp_width: int = 64,
-        mlp_depth: int = 2,
+            self,
+            n: int,
+            feature_dim: int,
+            embed_dim: int = 16,
+            sh_degree: int = 3,
+            mlp_width: int = 64,
+            mlp_depth: int = 2,
     ):
         super().__init__()
         self.embed_dim = embed_dim
@@ -229,7 +231,7 @@ class AppearanceOptModule(torch.nn.Module):
         self.color_head = torch.nn.Sequential(*layers)
 
     def forward(
-        self, features: Tensor, embed_ids: Tensor, dirs: Tensor, sh_degree: int
+            self, features: Tensor, embed_ids: Tensor, dirs: Tensor, sh_degree: int
     ) -> Tensor:
         """Adjust appearance based on embeddings.
 
