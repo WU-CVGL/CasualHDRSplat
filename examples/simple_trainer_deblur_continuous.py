@@ -179,6 +179,16 @@ class Config:
     # Use random background for training to discourage transparency
     random_bkgd: bool = True
 
+    ########### Exposure Time ###############
+
+    # Whether to optimize exposure time as a parameter
+    optimize_exposure_time: bool = True
+    # Learning rate for exposure time optimization
+    exposure_time_lr: float = 1e-3
+    # Exposure time gradient accumulation steps
+    exposure_time_gradient_accumulation_steps: int = 25
+
+
     ########### Camera Opt ###############
 
     # Learning rate for camera optimization
@@ -356,7 +366,6 @@ class DeblurRunner(Runner):
             self.strategy.check_sanity(self.splats, self.optimizers)
             self.strategy_state = self.strategy.initialize_state()
 
-        self.pose_optimizers = []
         self.camera_trajectory_config = CameraTrajectoryConfig(
             spline=SplineConfig(
                 degree=3,
@@ -365,7 +374,7 @@ class DeblurRunner(Runner):
                     initial_noise_se3_std=1e-5,
                 ),
             ),
-            optimize_exposure_time=True,
+            optimize_exposure_time=cfg.optimize_exposure_time,
             num_virtual_views=10,
         )
         self.camera_trajectory = self.camera_trajectory_config.setup(
@@ -374,13 +383,20 @@ class DeblurRunner(Runner):
             c2ws=torch.tensor(self.parser.camtoworlds).float(),
             device="cuda",
         )
-        self.pose_optimizers = [
-            torch.optim.Adam(
-                self.camera_trajectory.parameters(),
-                lr=cfg.pose_opt_lr * math.sqrt(cfg.batch_size),
+        camera_trajectory_param_groups = {}
+        self.camera_trajectory.get_param_groups(camera_trajectory_param_groups)
+        self.camera_trajectory_optimizer = torch.optim.Adam(
+            camera_trajectory_param_groups["camera_opt"],
+            lr=cfg.pose_opt_lr * math.sqrt(cfg.batch_size),
+            weight_decay=cfg.pose_opt_reg,
+        )
+
+        if cfg.optimize_exposure_time:
+            self.exposure_time_optimizer = torch.optim.Adam(
+                camera_trajectory_param_groups["exposure_times"],
+                lr=cfg.exposure_time_lr * math.sqrt(cfg.batch_size),
                 weight_decay=cfg.pose_opt_reg,
             )
-        ]
 
         self.app_optimizers = []
         if cfg.app_opt:
@@ -499,7 +515,7 @@ class DeblurRunner(Runner):
         ]
         # pose optimization has a learning rate schedule
         pose_scheduler = torch.optim.lr_scheduler.ExponentialLR(
-            self.pose_optimizers[0],
+            self.camera_trajectory_optimizer,
             gamma=cfg.pose_opt_lr_decay ** (1.0 / max_steps)
         )
         schedulers.append(pose_scheduler)
@@ -661,6 +677,11 @@ class DeblurRunner(Runner):
                 # monitor pose learning rate
                 self.writer.add_scalar("train/poseLR", pose_scheduler.get_last_lr()[0], step)
 
+                # monitor exposure time
+                if cfg.optimize_exposure_time:
+                    exposure_time = self.camera_trajectory.exposure_times.mean()
+                    self.writer.add_scalar("train/exposure_time", exposure_time, step)
+
                 # monitor ATE
                 metrics_dict = {}
                 self.camera_trajectory.get_metrics_dict(metrics_dict)
@@ -719,18 +740,30 @@ class DeblurRunner(Runner):
                         is_coalesced=len(Ks) == 1,
                     )
 
-            # optimize
+            # optimize 3DGS
             for optimizer in self.optimizers.values():
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
-            for optimizer in self.pose_optimizers:
-                if step % cfg.pose_gradient_accumulation_steps == cfg.pose_gradient_accumulation_steps - 1:
-                    optimizer.step()
-                if step % cfg.pose_gradient_accumulation_steps == 0:
-                    optimizer.zero_grad(set_to_none=True)
+
+            # optimize appearance
             for optimizer in self.app_optimizers:
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
+
+            # optimize exposure time
+            if cfg.optimize_exposure_time:
+                if step % cfg.exposure_time_gradient_accumulation_steps == cfg.exposure_time_gradient_accumulation_steps - 1:
+                    self.exposure_time_optimizer.step()
+                if step % cfg.exposure_time_gradient_accumulation_steps == 0:
+                    self.exposure_time_optimizer.zero_grad(set_to_none=True)
+
+            # optimize camera trajectory
+            if step % cfg.pose_gradient_accumulation_steps == cfg.pose_gradient_accumulation_steps - 1:
+                self.camera_trajectory_optimizer.step()
+            if step % cfg.pose_gradient_accumulation_steps == 0:
+                self.camera_trajectory_optimizer.zero_grad(set_to_none=True)
+
+            # update learning rate
             for scheduler in schedulers:
                 scheduler.step()
 
