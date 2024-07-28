@@ -47,6 +47,8 @@ class Spline(nn.Module):
 
     Args:
         config: the SplineConfig used to instantiate class
+        max_knots: the maximum number of control knots
+        device: cpu or cuda
     """
 
     config: SplineConfig

@@ -33,7 +33,13 @@ class SplineOptimizerConfig(InstantiateConfig):
 
 
 class SplineOptimizer(nn.Module):
-    """SE(3) B-Spline optimizer."""
+    """SE(3) B-Spline optimizer.
+
+    Args:
+        config: the SplineOptimizerConfig used to instantiate class
+        num_cameras: the number of cameras
+        device: cpu or cuda
+    """
 
     config: SplineOptimizerConfig
 

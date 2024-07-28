@@ -47,6 +47,10 @@ class CameraTrajectory(nn.Module):
 
     Args:
         config: the CameraTrajectoryConfig used to instantiate class
+        timestamps: the timestamps of the corresponding captured images
+        exposure_times: the exposure times of the captured images
+        c2ws: the camera poses of the captured images (camera to world)
+        device: cpu or cuda
     """
 
     config: CameraTrajectoryConfig
