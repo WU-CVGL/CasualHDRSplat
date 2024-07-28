@@ -60,7 +60,7 @@ class Config:
     # result_dir: str = "results/tanabata_vanilla"
     # result_dir: str = "results/tanabata_mcmc_500k_grad25"
     # result_dir: str = "results/tanabata_den4e-4_grad25_absgrad"
-    result_dir: str = "results/hdr_ikun_mcmc_test"
+    result_dir: str = "results/hdr_ikun_mcmc_500k_grad25_explr_1e-4"
     # Every N images there is a test image
     test_every: int = 8
     # Random crop size for training  (experimental)
@@ -184,7 +184,9 @@ class Config:
     # Whether to optimize exposure time as a parameter
     optimize_exposure_time: bool = True
     # Learning rate for exposure time optimization
-    exposure_time_lr: float = 1e-3
+    exposure_time_lr: float = 1e-4
+    # Learning rate decay rate of exposure time optimization
+    exposure_time_lr_decay: float = 1e-3
     # Exposure time gradient accumulation steps
     exposure_time_gradient_accumulation_steps: int = 25
 
@@ -520,6 +522,14 @@ class DeblurRunner(Runner):
         )
         schedulers.append(pose_scheduler)
 
+        # exposure time optimization has a learning rate schedule
+        if cfg.optimize_exposure_time:
+            exposure_time_scheduler = torch.optim.lr_scheduler.ExponentialLR(
+                self.exposure_time_optimizer,
+                gamma=cfg.exposure_time_lr_decay ** (1.0 / max_steps)
+            )
+            schedulers.append(exposure_time_scheduler)
+
         trainloader = torch.utils.data.DataLoader(
             self.trainset,
             batch_size=cfg.batch_size,
@@ -670,19 +680,16 @@ class DeblurRunner(Runner):
                 self.writer.add_scalar("train/loss", loss.item(), step)
                 self.writer.add_scalar("train/l1loss", l1loss.item(), step)
                 self.writer.add_scalar("train/ssimloss", ssimloss.item(), step)
-                self.writer.add_scalar(
-                    "train/num_GS", len(self.splats["means"]), step
-                )
+                self.writer.add_scalar("train/num_GS", len(self.splats["means"]), step)
                 self.writer.add_scalar("train/mem", mem, step)
-                # monitor pose learning rate
-                self.writer.add_scalar("train/poseLR", pose_scheduler.get_last_lr()[0], step)
 
                 # monitor exposure time
                 if cfg.optimize_exposure_time:
                     exposure_time = self.camera_trajectory.exposure_times.mean()
                     self.writer.add_scalar("train/exposure_time", exposure_time, step)
+                    self.writer.add_scalar("train/exposureLR", exposure_time_scheduler.get_last_lr()[0], step)
 
-                # monitor ATE
+                # monitor pose optimization
                 metrics_dict = {}
                 self.camera_trajectory.get_metrics_dict(metrics_dict)
                 self.writer.add_scalar(
@@ -695,7 +702,10 @@ class DeblurRunner(Runner):
                     metrics_dict["camera_opt_rotation"],
                     step
                 )
-                #     self.visualize_traj(step)
+                # monitor pose learning rate
+                self.writer.add_scalar("train/poseLR", pose_scheduler.get_last_lr()[0], step)
+                # monitor ATE
+                # self.visualize_traj(step)
 
                 if cfg.depth_loss:
                     self.writer.add_scalar("train/depthloss", depthloss.item(), step)
