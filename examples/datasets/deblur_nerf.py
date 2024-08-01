@@ -45,7 +45,11 @@ class DeblurNerfDataset(Dataset):
         super().__init__(parser, split, patch_size, load_depths)
         if split == "test":
             self.parser = deepcopy(parser)
-            gt_dir = parser.data_dir / "images_test"
+            if self.parser.factor > 1:
+                image_dir_suffix = f"_{self.parser.factor}"
+            else:
+                image_dir_suffix = ""
+            gt_dir = parser.data_dir / ("images_test" + image_dir_suffix)
             gt_image_paths = _find_files(gt_dir, ["*.png", "*.jpg", "*.JPG", "*.PNG"])
             num_gt_images = len(gt_image_paths)
             indices = np.arange(len(self.parser.image_names))

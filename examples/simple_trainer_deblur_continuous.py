@@ -79,7 +79,7 @@ class Config:
     # Number of training steps
     max_steps: int = 30_000
     # Steps to evaluate the model
-    eval_steps: List[int] = field(default_factory=lambda: [3_000, 7_000, 10_000, 15_000, 20_000, 30_000])
+    eval_steps: List[int] = field(default_factory=lambda: [500, 3_000, 7_000, 10_000, 15_000, 20_000, 30_000])
     # Steps to save the model
     save_steps: List[int] = field(default_factory=lambda: [3_000, 7_000, 10_000, 15_000, 20_000, 30_000])
 
@@ -451,53 +451,6 @@ class DeblurRunner(Runner):
                 "count": torch.zeros(n_gauss, device=self.device, dtype=torch.int),
             }
 
-    def rasterize_splats(
-            self,
-            camtoworlds: Tensor,
-            Ks: Tensor,
-            width: int,
-            height: int,
-            **kwargs,
-    ) -> Tuple[Tensor, Tensor, Dict]:
-        means = self.splats["means"]  # [N, 3]
-        # quats = F.normalize(self.splats["quats"], dim=-1)  # [N, 4]
-        # rasterization does normalization internally
-        quats = self.splats["quats"]  # [N, 4]
-        scales = torch.exp(self.splats["scales"])  # [N, 3]
-        opacities = torch.sigmoid(self.splats["opacities"])  # [N,]
-
-        image_ids = kwargs.pop("image_ids", None)
-        if self.cfg.app_opt:
-            colors = self.app_module(
-                features=self.splats["features"],
-                embed_ids=image_ids,
-                dirs=means[None, :, :] - camtoworlds[:, None, :3, 3],
-                sh_degree=kwargs.pop("sh_degree", self.cfg.sh_degree),
-            )
-            colors = colors + self.splats["colors"]
-            colors = torch.sigmoid(colors)
-        else:
-            colors = torch.cat([self.splats["sh0"], self.splats["shN"]], 1)  # [N, K, 3]
-
-        rasterize_mode = "antialiased" if self.cfg.antialiased else "classic"
-        render_colors, render_alphas, info = rasterization(
-            means=means,
-            quats=quats,
-            scales=scales,
-            opacities=opacities,
-            colors=colors,
-            viewmats=torch.linalg.inv(camtoworlds),  # [C, 4, 4]
-            Ks=Ks,  # [C, 3, 3]
-            width=width,
-            height=height,
-            packed=self.cfg.packed,
-            absgrad=self.cfg.absgrad,
-            sparse_grad=self.cfg.sparse_grad,
-            rasterize_mode=rasterize_mode,
-            **kwargs,
-        )
-        return render_colors, render_alphas, info
-
     def train(self):
         cfg = self.cfg
         device = self.device
@@ -606,6 +559,7 @@ class DeblurRunner(Runner):
 
             if not cfg.enable_mcmc:
                 self.strategy.step_pre_backward(
+
                     params=self.splats,
                     optimizers=self.optimizers,
                     state=self.strategy_state,
