@@ -124,7 +124,8 @@ class Spline(nn.Module):
     def get_segment(
             self,
             timestamps: Float[Tensor, "*batch_size"],
-            check_timestamps: bool = True
+            check_timestamps: bool = True,
+            eps: float = 1e-4
     ) -> Tuple[
         Float[LieTensor, "*batch_size self.order 7"],
         Float[Tensor, "*batch_size"]
@@ -134,11 +135,13 @@ class Spline(nn.Module):
         Args:
             timestamps: Timestamps to get the spline segment and normalized position at.
             check_timestamps: Whether to check if the timestamps are within the valid range.
+            eps: A small epsilon to avoid possible numerical issues.
 
         Returns:
             segment: The spline segment.
             u: The normalized position on the segment.
         """
+        timestamps = torch.clip(timestamps, self.t_lower_bound + eps, self.t_upper_bound - eps)
         if check_timestamps:
             valid, out_of_bound = self.check_timestamps(timestamps)
             try:
@@ -162,6 +165,9 @@ class Spline(nn.Module):
         indices = (start_index.tile((self.order, 1)).T +
                    torch.arange(self.order).tile((*batch_size, 1)).to(start_index.device))
 
+        # Check if indices are within the valid range.
+        # This should always be true with check_timestamps=True and eps=1e-4.
+        assert torch.logical_and(indices >= 0, indices < len(self)).all()
         segment = pp.SE3(torch.gather(
             self.data.expand(*batch_size, -1, -1),
             dim=1,

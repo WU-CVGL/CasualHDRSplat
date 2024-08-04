@@ -55,6 +55,7 @@ def linear_interpolation(
     Returns:
         The interpolated poses.
     """
+    assert ctrl_knots.shape[-2] == 2, "Linear interpolation requires 2 control knots."
     start_pose, end_pose = ctrl_knots[..., 0, :], ctrl_knots[..., 1, :]
     batch_size = start_pose.shape[:-1]
     interpolations = u.shape[-1]
