@@ -5,19 +5,19 @@ Created by lzzhao on 2024.04.30
 """
 from __future__ import annotations
 
-from copy import deepcopy
-from math import ceil
-from typing import Literal, Tuple, Optional, Type, Union
-
 import pypose as pp
 import torch
-from badgs.spline import Spline, SplineConfig
+from copy import deepcopy
 from dataclasses import dataclass, field
 from jaxtyping import Float, Int
-from nerfstudio.configs.base_config import InstantiateConfig
+from math import ceil
 from pypose import LieTensor
 from torch import nn, Tensor
+from typing import Literal, Tuple, Optional, Type, Union
 from typing_extensions import assert_never
+
+from badgs.base_config import InstantiateConfig
+from badgs.spline import Spline, SplineConfig
 
 TrajSamplingMode = Literal["uniform", "mid"]
 

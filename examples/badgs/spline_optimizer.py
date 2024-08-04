@@ -12,10 +12,11 @@ import pypose as pp
 import torch
 from dataclasses import dataclass, field
 from jaxtyping import Float, Int
-from nerfstudio.configs.base_config import InstantiateConfig
 from pypose import LieTensor
 from torch import nn, Tensor
 from typing_extensions import assert_never
+
+from badgs.base_config import InstantiateConfig
 
 
 @dataclass

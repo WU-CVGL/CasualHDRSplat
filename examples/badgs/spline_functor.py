@@ -95,6 +95,7 @@ def cubic_bspline_interpolation(
     Returns:
         The interpolated poses.
     """
+    assert ctrl_knots.shape[-2] == 4, "Cubic B-spline requires 4 control knots."
     batch_size = ctrl_knots.shape[:-2]
     interpolations = u.shape[-1]
 

@@ -11,11 +11,11 @@ import pypose as pp
 import torch
 from dataclasses import dataclass, field
 from jaxtyping import Bool, Float
-from nerfstudio.configs.base_config import InstantiateConfig
 from pypose import LieTensor
 from torch import nn, Tensor
 from typing_extensions import assert_never
 
+from badgs.base_config import InstantiateConfig
 from badgs.spline_functor import linear_interpolation, cubic_bspline_interpolation
 from badgs.spline_optimizer import SplineOptimizerConfig
 
