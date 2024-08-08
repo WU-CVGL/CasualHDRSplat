@@ -25,6 +25,7 @@ from utils import AppearanceOptModule, CameraOptModule, knn, rgb_to_sh, set_rand
 
 from gsplat.rendering import rasterization
 from gsplat.strategy import DefaultStrategy
+from gsplat.cuda._wrapper import spherical_harmonics
 
 
 @dataclass
@@ -158,18 +159,18 @@ class Config:
 
 
 def create_splats_with_optimizers(
-    parser: ColmapParser,
-    init_type: str = "sfm",
-    init_num_pts: int = 100_000,
-    init_extent: float = 3.0,
-    init_opacity: float = 0.1,
-    init_scale: float = 1.0,
-    scene_scale: float = 1.0,
-    sh_degree: int = 3,
-    sparse_grad: bool = False,
-    batch_size: int = 1,
-    feature_dim: Optional[int] = None,
-    device: str = "cuda",
+        parser: ColmapParser,
+        init_type: str = "sfm",
+        init_num_pts: int = 100_000,
+        init_extent: float = 3.0,
+        init_opacity: float = 0.1,
+        init_scale: float = 1.0,
+        scene_scale: float = 1.0,
+        sh_degree: int = 3,
+        sparse_grad: bool = False,
+        batch_size: int = 1,
+        feature_dim: Optional[int] = None,
+        device: str = "cuda",
 ) -> Tuple[torch.nn.ParameterDict, Dict[str, torch.optim.Optimizer]]:
     if init_type == "sfm":
         points = torch.from_numpy(parser.points).float()
@@ -355,12 +356,12 @@ class Runner:
             )
 
     def rasterize_splats(
-        self,
-        camtoworlds: Tensor,
-        Ks: Tensor,
-        width: int,
-        height: int,
-        **kwargs,
+            self,
+            camtoworlds: Tensor,
+            Ks: Tensor,
+            width: int,
+            height: int,
+            **kwargs,
     ) -> Tuple[Tensor, Tensor, Dict]:
         means = self.splats["means"]  # [N, 3]
         # quats = F.normalize(self.splats["quats"], dim=-1)  # [N, 4]
@@ -381,6 +382,25 @@ class Runner:
             colors = torch.sigmoid(colors)
         else:
             colors = torch.cat([self.splats["sh0"], self.splats["shN"]], 1)  # [N, K, 3]
+
+        if self.cfg.use_HDR:
+            try:
+                exposure_time = kwargs.pop('exposure_time').to(colors.device)
+            except:
+                exposure_time = torch.tensor(0, device=colors.device)
+            exposure_time = torch.clip(exposure_time, min=0.0001)
+            C = camtoworlds.shape[0]
+            dirs = means[None, :, :] - camtoworlds[:, None, :3, 3]
+            sh_degree = kwargs.pop("sh_degree")
+            shs = colors.expand(C, -1, -1, -1)
+            colors = spherical_harmonics(sh_degree, dirs, shs)
+            B = colors.shape[0]
+
+            colors_list = []
+            for i in range(B):
+                c = self.tonemapper(colors[i], exposure_time, self.cfg.k_times, image_ids)
+                colors_list.append(c)
+            colors = torch.stack(colors_list)
 
         rasterize_mode = "antialiased" if self.cfg.antialiased else "classic"
         render_colors, render_alphas, info = rasterization(
@@ -458,7 +478,7 @@ class Runner:
             Ks = data["K"].to(device)  # [1, 3, 3]
             pixels = data["image"].to(device) / 255.0  # [1, H, W, 3]
             num_train_rays_per_step = (
-                pixels.shape[0] * pixels.shape[1] * pixels.shape[2]
+                    pixels.shape[0] * pixels.shape[1] * pixels.shape[2]
             )
             image_ids = data["image_id"].to(device)
             if cfg.depth_loss:
@@ -543,7 +563,7 @@ class Runner:
             pbar.set_description(desc)
 
             if cfg.tb_every > 0 and step % cfg.tb_every == 0:
-                mem = torch.cuda.max_memory_allocated() / 1024**3
+                mem = torch.cuda.max_memory_allocated() / 1024 ** 3
                 self.writer.add_scalar("train/loss", loss.item(), step)
                 self.writer.add_scalar("train/l1loss", l1loss.item(), step)
                 self.writer.add_scalar("train/ssimloss", ssimloss.item(), step)
@@ -595,7 +615,7 @@ class Runner:
 
             # save checkpoint
             if step in [i - 1 for i in cfg.save_steps] or step == max_steps - 1:
-                mem = torch.cuda.max_memory_allocated() / 1024**3
+                mem = torch.cuda.max_memory_allocated() / 1024 ** 3
                 stats = {
                     "mem": mem,
                     "ellipse_time": time.time() - global_tic,
@@ -621,7 +641,7 @@ class Runner:
                 self.viewer.lock.release()
                 num_train_steps_per_sec = 1.0 / (time.time() - tic)
                 num_train_rays_per_sec = (
-                    num_train_rays_per_step * num_train_steps_per_sec
+                        num_train_rays_per_step * num_train_steps_per_sec
                 )
                 # Update the viewer state.
                 self.viewer.state.num_train_rays_per_sec = num_train_rays_per_sec
@@ -722,7 +742,7 @@ class Runner:
         canvas_all = []
         for i in tqdm.trange(len(camtoworlds), desc="Rendering trajectory"):
             renders, _, _ = self.rasterize_splats(
-                camtoworlds=camtoworlds[i : i + 1],
+                camtoworlds=camtoworlds[i: i + 1],
                 Ks=K[None],
                 width=width,
                 height=height,
@@ -753,7 +773,7 @@ class Runner:
 
     @torch.no_grad()
     def _viewer_render_fn(
-        self, camera_state: nerfview.CameraState, img_wh: Tuple[int, int]
+            self, camera_state: nerfview.CameraState, img_wh: Tuple[int, int]
     ):
         """Callable function for the viewer."""
         W, H = img_wh

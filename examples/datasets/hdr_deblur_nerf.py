@@ -1,6 +1,7 @@
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import numpy as np
 import torch
 from torch import Tensor
 
@@ -39,19 +40,26 @@ class HdrDeblurNerfDataset(DeblurNerfDataset):
 
         timestamps = torch.tensor([float(timestamp) for timestamp in timestamps])
         self._check_timestamps(timestamps)
-        if len(timestamps) == 1:
-            timestamps = timestamps.expand(len(outputs.image_filenames), 1)
+        # if len(timestamps) == 1:
+        #     timestamps = timestamps.expand(len(outputs.image_filenames), 1)
 
         parser.exposure_times = exposure_times
         parser.timestamps = timestamps
-
-        # Drop first and last images before we implement the spline extrapolation.
-        self.indices = self.indices[2:-2]
+        if split == 'val':
+            start_indices = self.indices[:self.parser.valstart]
+            end_indices = self.indices[-self.parser.valend:]
+            self.indices = np.concatenate((start_indices, end_indices))
+        else:
+            self.indices = self.indices[self.parser.valstart:-self.parser.valend]
+            # Drop first and last images before we implement the spline extrapolation.
+            self.indices = self.indices[2:-2]
 
     def __getitem__(self, item: int) -> Dict[str, Any]:
         data = super().__getitem__(item)
-        data["exposure_time"] = self.parser.exposure_times[item]
-        data["timestamp"] = self.parser.timestamps[item]
+        index = self.indices[item]
+
+        data["exposure_time"] = self.parser.exposure_times[index]
+        data["timestamp"] = self.parser.timestamps[index]
         return data
 
     def _get_timestamps_from_file(self, filename: Path) -> Dict[str, str]:
@@ -125,3 +133,18 @@ class HdrDeblurNerfDataset(DeblurNerfDataset):
                     print(f"[WARN] {filename} not found in the images directory.")
 
         return filenames
+
+    def _get_timesstamps_from_timestamps_to_filename(self, image_filenames):
+        mapping = {}
+        mapping_file_path = self.config.data / self.config.timestamps_to_filename_path
+        with open(mapping_file_path, 'r') as file:
+            for line in file:
+                timestamp, filename = line.strip().split()
+                mapping[filename] = timestamp
+        timestamps = []
+        for filename in image_filenames:
+            filename = os.path.basename(filename)
+            timestamp = mapping.get(filename)
+            timestamps.append(timestamp if timestamp else None)  # 如果找不到对应的时间戳，则添加 None
+
+        return timestamps

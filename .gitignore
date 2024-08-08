@@ -130,3 +130,5 @@ examples/*.png
 *.png
 
 examples/wandb
+
+gsplat/
