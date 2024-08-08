@@ -50,8 +50,9 @@ class HdrDeblurNerfDataset(DeblurNerfDataset):
 
     def __getitem__(self, item: int) -> Dict[str, Any]:
         data = super().__getitem__(item)
-        data["exposure_time"] = self.parser.exposure_times[item]
-        data["timestamp"] = self.parser.timestamps[item]
+        index = self.indices[item]
+        data["exposure_time"] = self.parser.exposure_times[index]
+        data["timestamp"] = self.parser.timestamps[index]
         return data
 
     def _get_timestamps_from_file(self, filename: Path) -> Dict[str, str]:
