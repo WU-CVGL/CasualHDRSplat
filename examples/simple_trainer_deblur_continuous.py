@@ -102,20 +102,6 @@ class Config:
     # Far plane clipping distance
     far_plane: float = 1e10
 
-    ########### Motion Deblur ###############
-
-    # BAD-Gaussians: Number of virtual cameras
-    num_virtual_views: int = 10
-    # BAD-Gaussians: Trajectory representation type
-    traj_type: Literal["linear", "cubic"] = "cubic"
-    # BAD-Gaussians: Trajectory interpolation ratio
-    traj_interpolate_ratio: float = 2.0
-
-    ########### HDR ###############
-
-    # Read HDR Deblur-NeRF Dataset
-    enable_hdr_deblur: bool = True
-
     ###### MCMC parameters ######
 
     # whether to use MCMC
@@ -182,44 +168,6 @@ class Config:
     # Use random background for training to discourage transparency
     random_bkgd: bool = True
 
-    ########### Exposure Time ###############
-
-    # Whether to optimize exposure time as a parameter
-    optimize_exposure_time: bool = True
-    # Learning rate for exposure time optimization
-    exposure_time_lr: float = 1e-4
-    # Learning rate decay rate of exposure time optimization
-    exposure_time_lr_decay: float = 1e-3
-    # Initial noise for exposure time optimization
-    exposure_time_init_noise: float = 1e-10
-    # Exposure time gradient accumulation steps
-    exposure_time_gradient_accumulation_steps: int = 25
-
-
-    ########### Camera Opt ###############
-
-    # Learning rate for camera optimization
-    pose_opt_lr: float = 1e-3
-    # Regularization for camera optimization as weight decay
-    pose_opt_reg: float = 1e-6
-    # Learning rate decay rate of camera optimization
-    pose_opt_lr_decay: float = 1e-3
-    # Initial noise for camera optimization
-    pose_init_noise_se3: float = 1e-5
-    # Pose gradient accumulation steps
-    pose_gradient_accumulation_steps: int = 25
-
-    ########### Novel View Eval Camera Opt ###############
-
-    # Steps per image to evaluate the novel view synthesis
-    nvs_steps: int = 500
-    # Novel view synthesis evaluation pose learning rate
-    nvs_pose_lr: float = 1e-3
-    # Novel view synthesis evaluation pose regularization
-    nvs_pose_reg: float = 0.0
-    # Novel view synthesis evaluation pose learning rate decay
-    nvs_pose_lr_decay: float = 1e-2
-
     ########### Appearance Opt ###############
 
     # Enable appearance optimization. (experimental)
@@ -252,7 +200,59 @@ class Config:
     # threshold of ratio of gaussian max to min scale before applying regularization loss from the PhysGaussian paper
     max_gauss_ratio: float = 10.0
 
-    ########### HDR settings ###############
+    ########### Motion Deblur ###############
+
+    # BAD-Gaussians: Number of virtual cameras
+    num_virtual_views: int = 10
+    # BAD-Gaussians: Trajectory representation type
+    traj_type: Literal["linear", "cubic"] = "cubic"
+    # BAD-Gaussians: Trajectory interpolation ratio
+    traj_interpolate_ratio: float = 2.0
+
+    ########### Camera Opt ###############
+
+    # Learning rate for camera optimization
+    pose_opt_lr: float = 1e-3
+    # Regularization for camera optimization as weight decay
+    pose_opt_reg: float = 1e-6
+    # Learning rate decay rate of camera optimization
+    pose_opt_lr_decay: float = 1e-3
+    # Initial noise for camera optimization
+    pose_init_noise_se3: float = 1e-5
+    # Pose gradient accumulation steps
+    pose_gradient_accumulation_steps: int = 25
+
+    ########### Novel View Eval Camera Opt ###############
+
+    # Steps per image to evaluate the novel view synthesis
+    nvs_steps: int = 500
+    # Novel view synthesis evaluation pose learning rate
+    nvs_pose_lr: float = 1e-3
+    # Novel view synthesis evaluation pose regularization
+    nvs_pose_reg: float = 0.0
+    # Novel view synthesis evaluation pose learning rate decay
+    nvs_pose_lr_decay: float = 1e-2
+
+    ########### Exposure Time ###############
+
+    # Whether to optimize exposure time as a parameter
+    optimize_exposure_time: bool = True
+    # Learning rate for exposure time optimization
+    exposure_time_lr: float = 1e-4
+    # Learning rate decay rate of exposure time optimization
+    exposure_time_lr_decay: float = 1e-3
+    # Initial noise for exposure time optimization
+    exposure_time_init_noise: float = 1e-10
+    # Exposure time gradient accumulation steps
+    exposure_time_gradient_accumulation_steps: int = 25
+
+
+    ########### HDR ###############
+
+    # Read HDR Deblur-NeRF Dataset
+    enable_hdr_deblur: bool = True
+
+    ########### HDR Tone Mapping ###############
 
     use_HDR: bool = True
     k_times: float = 16.0
