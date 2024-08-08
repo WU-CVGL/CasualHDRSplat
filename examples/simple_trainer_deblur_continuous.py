@@ -2,7 +2,7 @@ import json
 import math
 import os
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import List, Literal, Optional
 
 import imageio
 import numpy as np
@@ -17,12 +17,10 @@ from datasets.colmap_dataparser import ColmapParser
 from datasets.deblur_nerf import DeblurNerfDataset
 from datasets.hdr_deblur_nerf import HdrDeblurNerfDataset
 from datasets.traj import generate_interpolated_path
-from gsplat.rendering import rasterization
 from gsplat.strategy import DefaultStrategy, MCMCStrategy
 from nerfview.viewer import Viewer
 from pose_viewer import PoseViewer
 from simple_trainer import create_splats_with_optimizers, Runner
-from torch import Tensor
 from torch.utils.tensorboard import SummaryWriter
 from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
@@ -31,7 +29,8 @@ from utils import (
     CameraOptModuleSE3,
     set_random_seed,
 )
-from badgs.camera_trajectory import CameraTrajectoryConfig
+from badgs.camera_trajectory import CameraTrajectory, CameraTrajectoryConfig
+from badgs.exposure_time_optimizer import ExposureTimeOptimizerConfig
 from badgs.spline import SplineConfig
 from badgs.spline_optimizer import SplineOptimizerConfig
 
@@ -41,7 +40,7 @@ class Config:
     # Disable viewer
     disable_viewer: bool = False
     # Visualize cameras in viewer
-    visualize_cameras: bool = False
+    visualize_cameras: bool = True
 
     # Path to the .pt file. If provide, it will skip training and render a video
     # ckpt: Optional[str] = "results/tanabata_mcmc_500k_grad25/ckpts/ckpt_29999.pt"
@@ -50,9 +49,10 @@ class Config:
     # Path to the Mip-NeRF 360 dataset
     # data_dir: str = "data/360_v2/garden"
     # data_dir: str = "/datasets/bad-gaussian/data/bad-nerf-gtK-colmap-nvs/blurtanabata"
-    data_dir: str = "/datasets/HDR-Bad-Gaussian/images_ns_process"
+    # data_dir: str = "/datasets/HDR-Bad-Gaussian/images_ns_process"
+    data_dir: str = "/datasets/HDR-Bad-Gaussian/HDRBlurcozyroom_colmap_true_no_blur"
     # Downsample factor for the dataset
-    data_factor: int = 4
+    data_factor: int = 1
     # How much to scale the camera origins by. Default: 0.25 for LLFF scenes.
     scale_factor: float = 0.25
     # Directory to save results
@@ -60,7 +60,8 @@ class Config:
     # result_dir: str = "results/tanabata_vanilla"
     # result_dir: str = "results/tanabata_mcmc_500k_grad25"
     # result_dir: str = "results/tanabata_den4e-4_grad25_absgrad"
-    result_dir: str = "results/hdr_ikun_mcmc_500k_grad25_explr_1e-4"
+    # result_dir: str = "results/hdr_ikun_mcmc_500k_grad25_explr_1e-4"
+    result_dir: str = "results/HDRBlurcozyroom_colmap_true_no_blur"
     # Every N images there is a test image
     test_every: int = 8
     # Random crop size for training  (experimental)
@@ -105,8 +106,10 @@ class Config:
 
     # BAD-Gaussians: Number of virtual cameras
     num_virtual_views: int = 10
-    # BAD-Gaussians: Number of control knots
-    num_control_knots: int = 2
+    # BAD-Gaussians: Trajectory representation type
+    traj_type: Literal["linear", "cubic"] = "cubic"
+    # BAD-Gaussians: Trajectory interpolation ratio
+    traj_interpolate_ratio: float = 2.0
 
     ########### HDR ###############
 
@@ -187,6 +190,8 @@ class Config:
     exposure_time_lr: float = 1e-4
     # Learning rate decay rate of exposure time optimization
     exposure_time_lr_decay: float = 1e-3
+    # Initial noise for exposure time optimization
+    exposure_time_init_noise: float = 1e-10
     # Exposure time gradient accumulation steps
     exposure_time_gradient_accumulation_steps: int = 25
 
@@ -199,8 +204,8 @@ class Config:
     pose_opt_reg: float = 1e-6
     # Learning rate decay rate of camera optimization
     pose_opt_lr_decay: float = 1e-3
-    # Add noise to camera extrinsics. This is only to test the camera pose optimization.
-    pose_noise: float = 1e-5
+    # Initial noise for camera optimization
+    pose_init_noise_se3: float = 1e-5
     # Pose gradient accumulation steps
     pose_gradient_accumulation_steps: int = 25
 
@@ -368,18 +373,29 @@ class DeblurRunner(Runner):
             self.strategy.check_sanity(self.splats, self.optimizers)
             self.strategy_state = self.strategy.initialize_state()
 
-        self.camera_trajectory_config = CameraTrajectoryConfig(
+        # Camera Trajectory: Spline and Exposure Time Optimization
+        if cfg.traj_type == "linear":
+            spline_degree = 1
+        elif cfg.traj_type == "cubic":
+            spline_degree = 3
+        else:
+            raise NotImplementedError(f"Unknown trajectory type: {cfg.traj_type}")
+        self.camera_trajectory_config: CameraTrajectoryConfig = CameraTrajectoryConfig(
             spline=SplineConfig(
-                degree=3,
+                degree=spline_degree,
                 spline_optimizer=SplineOptimizerConfig(
                     mode="SE3",
-                    initial_noise_se3_std=1e-5,
+                    initial_noise_se3_std=cfg.pose_init_noise_se3,
                 ),
             ),
-            optimize_exposure_time=cfg.optimize_exposure_time,
-            num_virtual_views=10,
+            exposure_time_optimizer=ExposureTimeOptimizerConfig(
+                mode="linear" if cfg.optimize_exposure_time else "off",
+                initial_noise_std=cfg.exposure_time_init_noise,
+            ),
+            num_virtual_views=cfg.num_virtual_views,
+            traj_interpolate_ratio=cfg.traj_interpolate_ratio,
         )
-        self.camera_trajectory = self.camera_trajectory_config.setup(
+        self.camera_trajectory: CameraTrajectory = self.camera_trajectory_config.setup(
             timestamps=self.parser.timestamps,
             exposure_times=self.parser.exposure_times,
             c2ws=torch.tensor(self.parser.camtoworlds).float(),
@@ -392,14 +408,13 @@ class DeblurRunner(Runner):
             lr=cfg.pose_opt_lr * math.sqrt(cfg.batch_size),
             weight_decay=cfg.pose_opt_reg,
         )
+        self.exposure_time_optimizer = torch.optim.Adam(
+            camera_trajectory_param_groups["exposure_time_opt"],
+            lr=cfg.exposure_time_lr * math.sqrt(cfg.batch_size),
+            weight_decay=cfg.exposure_time_lr_decay,
+        )
 
-        if cfg.optimize_exposure_time:
-            self.exposure_time_optimizer = torch.optim.Adam(
-                camera_trajectory_param_groups["exposure_times"],
-                lr=cfg.exposure_time_lr * math.sqrt(cfg.batch_size),
-                weight_decay=cfg.pose_opt_reg,
-            )
-
+        # Appearance Optimization
         self.app_optimizers = []
         if cfg.app_opt:
             self.app_module = AppearanceOptModule(
@@ -623,10 +638,6 @@ class DeblurRunner(Runner):
             desc = f"loss={loss.item():.3f}| " f"sh degree={sh_degree_to_use}| "
             if cfg.depth_loss:
                 desc += f"depth loss={depthloss.item():.6f}| "
-            if cfg.pose_noise:
-                # monitor the pose error if we inject noise
-                pose_err = F.l1_loss(camtoworlds_gt, camtoworlds)
-                desc += f"pose err={pose_err.item():.6f}| "
             pbar.set_description(desc)
 
             if cfg.tb_every > 0 and step % cfg.tb_every == 0:
@@ -636,12 +647,6 @@ class DeblurRunner(Runner):
                 self.writer.add_scalar("train/ssimloss", ssimloss.item(), step)
                 self.writer.add_scalar("train/num_GS", len(self.splats["means"]), step)
                 self.writer.add_scalar("train/mem", mem, step)
-
-                # monitor exposure time
-                if cfg.optimize_exposure_time:
-                    exposure_time = self.camera_trajectory.exposure_times.mean()
-                    self.writer.add_scalar("train/exposure_time", exposure_time, step)
-                    self.writer.add_scalar("train/exposureLR", exposure_time_scheduler.get_last_lr()[0], step)
 
                 # monitor pose optimization
                 metrics_dict = {}
@@ -656,6 +661,19 @@ class DeblurRunner(Runner):
                     metrics_dict["camera_opt_rotation"],
                     step
                 )
+                # monitor exposure time
+                if cfg.optimize_exposure_time:
+                    self.writer.add_scalar(
+                        "train/exposure_time_opt",
+                        metrics_dict["exposure_time_opt"],
+                        step
+                    )
+                    self.writer.add_scalar(
+                        "train/exposureLR",
+                        exposure_time_scheduler.get_last_lr()[0],
+                        step
+                    )
+
                 # monitor pose learning rate
                 self.writer.add_scalar("train/poseLR", pose_scheduler.get_last_lr()[0], step)
                 # monitor ATE
@@ -870,7 +888,7 @@ class DeblurRunner(Runner):
             pixels_ = pixels.permute(0, 3, 1, 2)  # [1, 3, H, W]
 
             novel_view_pose_adjust = CameraOptModuleSE3(1).to(self.device)
-            novel_view_pose_adjust.random_init(cfg.pose_noise)
+            novel_view_pose_adjust.random_init(cfg.pose_init_noise_se3)
             novel_view_pose_optimizer = torch.optim.Adam(
                 novel_view_pose_adjust.parameters(),
                 lr=cfg.nvs_pose_lr * math.sqrt(cfg.batch_size),
@@ -1031,8 +1049,8 @@ def main(cfg: Config):
         ckpt = torch.load(cfg.ckpt, map_location=runner.device)
         for k in runner.splats.keys():
             runner.splats[k].data = ckpt["splats"][k].detach().to(runner.device)
-            runner.camera_trajectory.exposure_times = ckpt[
-                "camera_trajectory"]["exposure_time"].detach().to(runner.device)
+            runner.camera_trajectory.exposure_time_optimizer.adjustment = ckpt[
+                "camera_trajectory"]["exposure_time_optimizer.adjustment"].detach().to(runner.device)
             runner.camera_trajectory.spline.spline_optimizer.pose_adjustment = ckpt[
                 "camera_trajectory"]["'spline.spline_optimizer.pose_adjustment'"].detach().to(runner.device)
         runner.eval_deblur(step=ckpt["step"])

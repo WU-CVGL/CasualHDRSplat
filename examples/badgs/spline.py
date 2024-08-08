@@ -38,7 +38,9 @@ class SplineConfig(InstantiateConfig):
     start_time: float = 0.0
     """Starting timestamp of the spline."""
 
-    spline_optimizer: SplineOptimizerConfig = field(default_factory=SplineOptimizerConfig)
+    spline_optimizer: SplineOptimizerConfig = field(
+        default_factory=lambda: SplineOptimizerConfig(mode="off")
+    )
     """Configuration for the spline optimizer."""
 
 
@@ -105,10 +107,10 @@ class Spline(nn.Module):
     def check_timestamps(
             self,
             timestamps: Float[Tensor, "*batch_size"]
-        ) -> Tuple[
-            bool,
-            Optional[Bool[Tensor, "*batch_size"]]
-        ]:
+    ) -> Tuple[
+        bool,
+        Optional[Bool[Tensor, "*batch_size"]]
+    ]:
         """Check if the timestamps are within the valid range.
 
         Args:

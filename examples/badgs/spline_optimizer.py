@@ -103,8 +103,9 @@ class SplineOptimizer(nn.Module):
 
     def get_metrics_dict(self, metrics_dict: dict) -> None:
         """Add spline optimizer metrics"""
-        metrics_dict["camera_opt_translation"] = self.pose_adjustment[:, :3].norm()
-        metrics_dict["camera_opt_rotation"] = self.pose_adjustment[:, 3:].norm()
+        if self.config.mode != "off":
+            metrics_dict["camera_opt_translation"] = self.pose_adjustment[:, :3].norm()
+            metrics_dict["camera_opt_rotation"] = self.pose_adjustment[:, 3:].norm()
 
     def get_param_groups(self, param_groups: dict) -> None:
         """Get camera optimizer parameters"""
