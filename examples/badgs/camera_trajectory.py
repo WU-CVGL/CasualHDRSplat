@@ -5,18 +5,20 @@ Created by lzzhao on 2024.04.30
 """
 from __future__ import annotations
 
+from copy import deepcopy
+from math import ceil
+from typing import Literal, Tuple, Optional, Type, Union
+
 import pypose as pp
 import torch
-from copy import deepcopy
 from dataclasses import dataclass, field
 from jaxtyping import Float, Int
-from math import ceil
 from pypose import LieTensor
 from torch import nn, Tensor
-from typing import Literal, Tuple, Optional, Type, Union
 from typing_extensions import assert_never
 
 from badgs.base_config import InstantiateConfig
+from badgs.exposure_time_optimizer import ExposureTimeOptimizerConfig
 from badgs.spline import Spline, SplineConfig
 
 TrajSamplingMode = Literal["uniform", "mid"]
@@ -32,8 +34,10 @@ class CameraTrajectoryConfig(InstantiateConfig):
     spline: SplineConfig = field(default_factory=SplineConfig)
     """Configuration for the spline trajectory."""
 
-    optimize_exposure_time: bool = False
-    """Whether to enable exposure time as a parameter."""
+    exposure_time_optimizer: ExposureTimeOptimizerConfig = field(
+        default_factory=lambda: ExposureTimeOptimizerConfig(mode="off")
+    )
+    """Configuration for the exposure time optimizer."""
 
     num_virtual_views: int = 10
     """The number of samples used to model the motion-blurring."""
@@ -73,7 +77,7 @@ class CameraTrajectory(nn.Module):
 
         # Spline
         self.config.spline.start_time = timestamps[0].item()
-        self.frame_interval = (timestamps[1] - timestamps[0]).item()
+        self.frame_interval: float = (timestamps[1] - timestamps[0]).item()
 
         # temporary spline to interpolate for the camera trajectory initialization
         temp_spline_config = deepcopy(self.config.spline)
@@ -105,10 +109,11 @@ class CameraTrajectory(nn.Module):
         self.spline.set_data(self.poses)
 
         # Exposure times
-        if self.config.optimize_exposure_time:
-            self.exposure_times = nn.Parameter(exposure_times)
-        else:
-            self.exposure_times = exposure_times
+        self.exposure_times = exposure_times.to(self.device)
+        self.exposure_time_optimizer = self.config.exposure_time_optimizer.setup(
+            num_cameras=len(exposure_times),
+            device=device,
+        )
 
     def forward(
             self,
@@ -160,20 +165,21 @@ class CameraTrajectory(nn.Module):
         Returns:
             exposure_time: the exposure time
         """
-        exposure_time = self.exposure_times[image_idx]
-        return torch.clamp(exposure_time, min=1e-5, max=self.frame_interval)
+        exposure_time_opt = self.exposure_time_optimizer(image_idx)
+        exposure_time = self.exposure_times[image_idx] + exposure_time_opt
+        return torch.clamp(exposure_time,min=1e-5, max=self.frame_interval)
 
     def get_loss_dict(self, loss_dict: dict) -> None:
         """Add regularization"""
-        pass
+        self.spline.get_loss_dict(loss_dict)
+        self.exposure_time_optimizer.get_loss_dict(loss_dict)
 
     def get_metrics_dict(self, metrics_dict: dict) -> None:
         """Get camera optimizer metrics"""
         self.spline.get_metrics_dict(metrics_dict)
-        metrics_dict["exposure_times"] = torch.mean(self.exposure_times).item()
+        self.exposure_time_optimizer.get_metrics_dict(metrics_dict)
 
     def get_param_groups(self, param_groups: dict) -> None:
         """Get spline parameters"""
         self.spline.get_param_groups(param_groups)
-        if self.config.optimize_exposure_time:
-            param_groups["exposure_times"] = [self.exposure_times]
+        self.exposure_time_optimizer.get_param_groups(param_groups)

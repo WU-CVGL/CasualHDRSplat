@@ -57,7 +57,6 @@ class HdrDeblurNerfDataset(DeblurNerfDataset):
     def __getitem__(self, item: int) -> Dict[str, Any]:
         data = super().__getitem__(item)
         index = self.indices[item]
-
         data["exposure_time"] = self.parser.exposure_times[index]
         data["timestamp"] = self.parser.timestamps[index]
         return data
@@ -134,17 +133,17 @@ class HdrDeblurNerfDataset(DeblurNerfDataset):
 
         return filenames
 
-    def _get_timesstamps_from_timestamps_to_filename(self, image_filenames):
-        mapping = {}
-        mapping_file_path = self.config.data / self.config.timestamps_to_filename_path
-        with open(mapping_file_path, 'r') as file:
-            for line in file:
-                timestamp, filename = line.strip().split()
-                mapping[filename] = timestamp
-        timestamps = []
-        for filename in image_filenames:
-            filename = os.path.basename(filename)
-            timestamp = mapping.get(filename)
-            timestamps.append(timestamp if timestamp else None)  # 如果找不到对应的时间戳，则添加 None
+    # def _get_timesstamps_from_timestamps_to_filename(self, image_filenames):
+    #     mapping = {}
+    #     mapping_file_path = self.config.data / self.config.timestamps_to_filename_path
+    #     with open(mapping_file_path, 'r') as file:
+    #         for line in file:
+    #             timestamp, filename = line.strip().split()
+    #             mapping[filename] = timestamp
+    #     timestamps = []
+    #     for filename in image_filenames:
+    #         filename = os.path.basename(filename)
+    #         timestamp = mapping.get(filename)
+    #         timestamps.append(timestamp if timestamp else None)  # 如果找不到对应的时间戳，则添加 None
 
-        return timestamps
+    #     return timestamps
