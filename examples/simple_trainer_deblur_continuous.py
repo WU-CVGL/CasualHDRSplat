@@ -239,6 +239,8 @@ class Config:
     optimize_exposure_time: bool = True
     # Learning rate for exposure time optimization
     exposure_time_lr: float = 1e-4
+    # Regularization for exposure time optimization as weight decay
+    exposure_time_reg: float = 1e-6
     # Learning rate decay rate of exposure time optimization
     exposure_time_lr_decay: float = 1e-3
     # Initial noise for exposure time optimization
@@ -246,6 +248,16 @@ class Config:
     # Exposure time gradient accumulation steps
     exposure_time_gradient_accumulation_steps: int = 25
 
+    ########### Novel View Exposure Time ###############
+
+    # Whether to optimize exposure time for novel view synthesis
+    nvs_optimize_exposure_time: bool = False
+    # Novel view synthesis evaluation exposure time learning rate
+    nvs_exposure_time_lr: float = 1e-4
+    # Novel view synthesis evaluation exposure time regularization
+    nvs_exposure_time_reg: float = 0.0
+    # Novel view synthesis evaluation exposure time learning rate decay
+    nvs_exposure_time_lr_decay: float = 1e-3
 
     ########### HDR ###############
 
@@ -265,6 +277,7 @@ class Config:
     ######################################
 
     def __post_init__(self):
+        # Change some correlated parameters after initialization of the config
         if self.enable_mcmc:
             print("MCMC enabled.")
             self.scale_factor = self.scale_factor_mcmc
@@ -423,7 +436,7 @@ class DeblurRunner(Runner):
         self.exposure_time_optimizer = torch.optim.Adam(
             camera_trajectory_param_groups["exposure_time_opt"],
             lr=cfg.exposure_time_lr * math.sqrt(cfg.batch_size),
-            weight_decay=cfg.exposure_time_lr_decay,
+            weight_decay=cfg.exposure_time_reg,
         )
 
         # HDR Tone Mapper
@@ -520,7 +533,7 @@ class DeblurRunner(Runner):
         if cfg.optimize_exposure_time:
             exposure_time_scheduler = torch.optim.lr_scheduler.ExponentialLR(
                 self.exposure_time_optimizer,
-                gamma=cfg.exposure_time_lr_decay ** (1.0 / max_steps)
+                gamma=cfg.exposure_time_lr_decay ** (1.0 / max_steps),
             )
             schedulers.append(exposure_time_scheduler)
 
@@ -905,9 +918,14 @@ class DeblurRunner(Runner):
 
     def eval_novel_view(self, step: int):
         """Entry for evaluation."""
-        print("Running evaluation...")
+        NVS_DEBUG_STEP = 50
+        DEBUG_PRINT_PRECISION = 10
+        torch.set_printoptions(precision=DEBUG_PRINT_PRECISION)
+        ZERO_INT = torch.tensor([0])
+
         cfg = self.cfg
         device = self.device
+        print("Running evaluation...")
 
         valloader = torch.utils.data.DataLoader(
             self.valset, batch_size=1, shuffle=False, num_workers=1
@@ -931,10 +949,34 @@ class DeblurRunner(Runner):
             pixels = data["image"].to(device) / 255.0  # [1, H, W, 3]
             height, width = pixels.shape[1:3]
             image_ids = data["image_id"].to(device)
-            exposure_time = data['exposure_time']
-            print('exposure:', exposure_time.item())
+            exposure_time = data['exposure_time'].to(device)
+            print('NVS eval - Initial exposure time:', exposure_time.item())
             pixels_ = pixels.permute(0, 3, 1, 2)  # [1, 3, H, W]
 
+            novel_view_schedulers = []
+
+            # Exposure Time Optimization
+            novel_view_exposure_time_adjust = ExposureTimeOptimizerConfig(
+                mode="linear" if cfg.nvs_optimize_exposure_time else "off",
+                initial_noise_std=cfg.exposure_time_init_noise,
+            ).setup(
+                num_cameras=1,
+                device=device,
+            )
+            if cfg.nvs_optimize_exposure_time:
+                novel_view_exposure_time_optimizer = torch.optim.Adam(
+                    novel_view_exposure_time_adjust.parameters(),
+                    lr=cfg.nvs_exposure_time_lr * math.sqrt(cfg.batch_size),
+                    weight_decay=cfg.nvs_exposure_time_reg,
+                    eps=1e-15,
+                )
+                novel_view_exposure_time_scheduler = torch.optim.lr_scheduler.ExponentialLR(
+                    novel_view_exposure_time_optimizer,
+                    gamma=cfg.nvs_exposure_time_lr_decay ** (1.0 / cfg.max_steps)
+                )
+                novel_view_schedulers.append(novel_view_exposure_time_scheduler)
+
+            # Pose Optimization
             novel_view_pose_adjust = CameraOptModuleSE3(1).to(self.device)
             novel_view_pose_adjust.random_init(cfg.pose_init_noise_se3)
             novel_view_pose_optimizer = torch.optim.Adam(
@@ -943,14 +985,15 @@ class DeblurRunner(Runner):
                 weight_decay=cfg.nvs_pose_reg,
                 eps=1e-15,
             )
-
-            scheduler = torch.optim.lr_scheduler.ExponentialLR(
+            novel_view_pose_scheduler = torch.optim.lr_scheduler.ExponentialLR(
                 novel_view_pose_optimizer,
                 gamma=cfg.pose_opt_lr_decay ** (1.0 / cfg.max_steps)
             )
+            novel_view_schedulers.append(novel_view_pose_scheduler)
 
             for j in range(cfg.nvs_steps):
-                camtoworlds_new = novel_view_pose_adjust(camtoworlds, torch.tensor([0]).to(self.device))
+                camtoworlds_new = novel_view_pose_adjust(camtoworlds, torch.tensor(ZERO_INT).to(self.device))
+                exposure_time_new = exposure_time + novel_view_exposure_time_adjust(ZERO_INT)
                 colors, alphas, info = self.rasterize_splats(
                     camtoworlds=camtoworlds_new,
                     Ks=Ks,
@@ -961,9 +1004,8 @@ class DeblurRunner(Runner):
                     far_plane=cfg.far_plane,
                     image_ids=image_ids,
                     render_mode="RGB",
-                    exposure_time=exposure_time,
+                    exposure_time=exposure_time_new,
                 )
-                # colors = torch.clamp(colors, 0.0, 1.0)
                 colors_ = colors.permute(0, 3, 1, 2)  # [1, 3, H, W]
 
                 # loss
@@ -973,12 +1015,17 @@ class DeblurRunner(Runner):
 
                 loss.backward()
 
+                if cfg.nvs_optimize_exposure_time:
+                    novel_view_exposure_time_optimizer.step()
+                    novel_view_exposure_time_optimizer.zero_grad(set_to_none=True)
                 novel_view_pose_optimizer.step()
                 novel_view_pose_optimizer.zero_grad(set_to_none=True)
 
-                scheduler.step()
+                for scheduler in novel_view_schedulers:
+                    scheduler.step()
+
                 with torch.no_grad():
-                    if j % 50 == 0:
+                    if j % NVS_DEBUG_STEP == 0:
                         colors_ = torch.clamp(colors_, 0.0, 1.0)
                         psnr = self.psnr(colors_.detach(), pixels_)
                         ssim = self.ssim(colors_, pixels_)
@@ -987,7 +1034,7 @@ class DeblurRunner(Runner):
                             f"NVS eval at Step_{step:04d}:"
                             f"NVS_IMG_#{i:04d}_step_{j:04d}:"
                             f"PSNR: {psnr.item():.3f}, SSIM: {ssim.item():.4f}, LPIPS: {lpips.item():.3f} "
-                            f"exposure_time:{exposure_time.item():.3f}"
+                            f"exposure_time:{exposure_time_new.item():.5f}"
                         )
                         metrics["psnr"].append(psnr)
                         metrics["ssim"].append(ssim)
@@ -1069,7 +1116,7 @@ class DeblurRunner(Runner):
                 near_plane=cfg.near_plane,
                 far_plane=cfg.far_plane,
                 render_mode="RGB+ED",
-                exposure_time=Tensor(0)
+                exposure_time=torch.Tensor(0)
             )  # [1, H, W, 4]
             colors = torch.clamp(renders[0, ..., 0:3], 0.0, 1.0)  # [H, W, 3]
             depths = renders[0, ..., 3:4]  # [H, W, 1]
