@@ -27,6 +27,7 @@ parts/
 sdist/
 var/
 wheels/
+/examples/results
 *.egg-info/
 .installed.cfg
 *.egg
@@ -132,3 +133,6 @@ examples/*.png
 examples/wandb
 
 gsplat/
+gsplat.egg-info/
+examples/results
+./sci-gsplat.tar.gz

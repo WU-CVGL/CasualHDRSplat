@@ -50,7 +50,7 @@ class Config:
     # data_dir: str = "data/360_v2/garden"
     # data_dir: str = "/datasets/bad-gaussian/data/bad-nerf-gtK-colmap-nvs/blurtanabata"
     # data_dir: str = "/datasets/HDR-Bad-Gaussian/images_ns_process"
-    data_dir: str = "/datasets/HDR-Bad-Gaussian/HDRBlurcozyroom_colmap_true_no_blur"
+    data_dir: str = "/home/cvgluser/blender/blender-3.6.13-linux-x64/data/deblurnerf/rawdata_new_tra1/cozyroom/process"
     # Downsample factor for the dataset
     data_factor: int = 1
     # How much to scale the camera origins by. Default: 0.25 for LLFF scenes.
@@ -61,7 +61,7 @@ class Config:
     # result_dir: str = "results/tanabata_mcmc_500k_grad25"
     # result_dir: str = "results/tanabata_den4e-4_grad25_absgrad"
     # result_dir: str = "results/hdr_ikun_mcmc_500k_grad25_explr_1e-4"
-    result_dir: str = "results/HDRBlurcozyroom_colmap_true_no_blur"
+    result_dir: str = "results/new_cozyroom_gt_exp_no_novel_exp_lr_4"
     # Every N images there is a test image
     test_every: int = 9999
     # Random crop size for training  (experimental)
@@ -80,9 +80,9 @@ class Config:
     # Number of training steps
     max_steps: int = 30_000
     # Steps to evaluate the model
-    eval_steps: List[int] = field(default_factory=lambda: [500, 3_000, 7_000, 10_000, 15_000, 20_000, 30_000])
+    eval_steps: List[int] = field(default_factory=lambda: [ 5_000, 10_000, 15_000, 20_000, 30_000])
     # Steps to save the model
-    save_steps: List[int] = field(default_factory=lambda: [3_000, 7_000, 10_000, 15_000, 20_000, 30_000])
+    save_steps: List[int] = field(default_factory=lambda: [ 5_000, 10_000, 15_000, 20_000, 30_000])
 
     # Initialization strategy
     init_type: str = "sfm"
@@ -173,7 +173,7 @@ class Config:
     # Enable appearance optimization. (experimental)
     app_opt: bool = False
     # Appearance embedding dimension
-    app_embed_dim: int = 16
+    app_embed_dim: int = 32
     # Learning rate for appearance optimization
     app_opt_lr: float = 1e-3
     # Regularization for appearance optimization as weight decay
@@ -251,7 +251,7 @@ class Config:
     ########### Novel View Exposure Time ###############
 
     # Whether to optimize exposure time for novel view synthesis
-    nvs_optimize_exposure_time: bool = False
+    nvs_optimize_exposure_time: bool = True
     # Novel view synthesis evaluation exposure time learning rate
     nvs_exposure_time_lr: float = 1e-4
     # Novel view synthesis evaluation exposure time regularization
@@ -267,7 +267,8 @@ class Config:
     ########### HDR Tone Mapping ###############
 
     use_HDR: bool = True
-    k_times: float = 16.0
+    # k_times: float = 32.0
+    k_times = float([f for f in os.listdir(data_dir) if f.startswith('k_times=')][0].split('=')[1])
     tonemapper_lr: float = 0.005
 
     tonemapper_reg: float = 1e-6
@@ -536,6 +537,13 @@ class DeblurRunner(Runner):
                 gamma=cfg.exposure_time_lr_decay ** (1.0 / max_steps),
             )
             schedulers.append(exposure_time_scheduler)
+        if cfg.use_HDR:
+            tonemapper_scheduler = torch.optim.lr_scheduler.ExponentialLR(
+                self.exposure_time_optimizer,
+                gamma=cfg.tonemapper_lr_decay ** (1.0 / max_steps),
+            )
+            schedulers.append(tonemapper_scheduler)
+
 
         trainloader = torch.utils.data.DataLoader(
             self.trainset,
@@ -673,6 +681,7 @@ class DeblurRunner(Runner):
                 loss += F.l1_loss(colors/2/colors.mean(), pixels/2/pixels.mean())
                 if exposure_times < 0:
                     loss += -exposure_times
+                # loss +=self.tonemapper.MonotonicityLoss(self.cfg.k_times,self.device)
             else:
                 scale_reg = torch.tensor(0.0).to(self.device)
 
@@ -1006,6 +1015,7 @@ class DeblurRunner(Runner):
                     render_mode="RGB",
                     exposure_time=exposure_time_new,
                 )
+                colors = torch.clamp(colors, 0.0, 1.0)
                 colors_ = colors.permute(0, 3, 1, 2)  # [1, 3, H, W]
 
                 # loss
@@ -1026,7 +1036,6 @@ class DeblurRunner(Runner):
 
                 with torch.no_grad():
                     if j % NVS_DEBUG_STEP == 0:
-                        colors_ = torch.clamp(colors_, 0.0, 1.0)
                         psnr = self.psnr(colors_.detach(), pixels_)
                         ssim = self.ssim(colors_, pixels_)
                         lpips = self.lpips(colors_.detach(), pixels_)
@@ -1053,11 +1062,11 @@ class DeblurRunner(Runner):
                         # self.writer.add_scalar(f"nvs/{step}/{i}/camera_opt_rotation", novel_view_pose_adjust.poses_opt[:, 3:].mean(), j)
                         # self.writer.flush()
 
-                        # write images
-                        canvas = torch.cat([pixels, colors], dim=2).squeeze(0).detach().cpu().numpy()
-                        imageio.imwrite(
-                            f"{self.render_dir}/{step:04d}_nvs_{i:04d}_{j:04d}.png", (canvas * 255).astype(np.uint8)
-                        )
+            # write images
+            canvas = torch.cat([pixels, colors], dim=2).squeeze(0).detach().cpu().numpy()
+            imageio.imwrite(
+                f"{self.render_dir}/{step:04d}_nvs_{i:04d}_{j:04d}.png", (canvas * 255).astype(np.uint8)
+            )
         psnr = torch.stack(metrics["psnr"]).mean()
         ssim = torch.stack(metrics["ssim"]).mean()
         lpips = torch.stack(metrics["lpips"]).mean()

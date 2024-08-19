@@ -388,7 +388,7 @@ class Runner:
                 exposure_time = kwargs.pop('exposure_time').to(colors.device)
             except:
                 exposure_time = torch.tensor(0, device=colors.device)
-            exposure_time = torch.clip(exposure_time, min=0.0001)
+            exposure_time = torch.clip(exposure_time, min=1e-10,max=0.5)
             C = camtoworlds.shape[0]
             dirs = means[None, :, :] - camtoworlds[:, None, :3, 3]
             sh_degree = kwargs.pop("sh_degree")

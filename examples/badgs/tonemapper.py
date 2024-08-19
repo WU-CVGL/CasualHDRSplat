@@ -116,6 +116,41 @@ class ToneMapper(torch.nn.Module):
         weight[higher] = ((2 - weight[higher] / 2 * (1 - high)) ** 2)
         return weight
 
+    def MonotonicityLoss(self, k_times, device):
+        min = 0
+        max = 0.5 * k_times
+        random_samples_r = torch.rand(size=(10000, 1), device=device) * max
+        random_samples_g = torch.rand(size=(10000, 1), device=device) * max
+        random_samples_b = torch.rand(size=(10000, 1), device=device) * max
+
+        r_l = self.Linear_r(random_samples_r)
+        g_l = self.Linear_g(random_samples_g)
+        b_l = self.Linear_b(random_samples_b)
+
+        r_l = (torch.tanh(r_l) + 1) / 2
+        g_l = (torch.tanh(g_l) + 1) / 2
+        b_l = (torch.tanh(b_l) + 1) / 2
+        sorted_indices_r = torch.argsort(random_samples_r, dim=0)
+        sorted_indices_g = torch.argsort(random_samples_g, dim=0)
+        sorted_indices_b = torch.argsort(random_samples_b, dim=0)
+
+        sorted_r_l = r_l[sorted_indices_r.squeeze()]
+        sorted_g_l = g_l[sorted_indices_g.squeeze()]
+        sorted_b_l = b_l[sorted_indices_b.squeeze()]
+
+        diff_r = torch.diff(sorted_r_l, dim=0)
+        diff_g = torch.diff(sorted_g_l, dim=0)
+        diff_b = torch.diff(sorted_b_l, dim=0)
+
+        # 单调性损失：确保差异为非负值
+        loss_r = torch.sum(torch.relu(-diff_r))
+        loss_g = torch.sum(torch.relu(-diff_g))
+        loss_b = torch.sum(torch.relu(-diff_b))
+
+        # 合并 RGB 的单调性损失
+        total_monotonicity_loss = loss_r + loss_g + loss_b
+        return total_monotonicity_loss
+
     @torch.no_grad()
     def export_mapping_function(self):
         N = 30
