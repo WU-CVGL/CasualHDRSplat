@@ -2,10 +2,11 @@ import json
 import math
 import os
 import time
-from typing import Dict, List, Optional, Tuple
+import yaml
+from typing import List
+from typing_extensions import assert_never
 
 import imageio
-import nerfview
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -13,68 +14,46 @@ import tqdm
 import tyro
 import viser
 from dataclasses import dataclass, field
-from torch import Tensor
+from gsplat.distributed import cli
+from gsplat.strategy import DefaultStrategy, MCMCStrategy
+from nerfview.viewer import Viewer
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
 from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 
+from badgs.bad_camera_optimizer import BadCameraOptimizer, BadCameraOptimizerConfig
 from datasets.colmap import Dataset
 from datasets.colmap_dataparser import ColmapParser
 from datasets.deblur_nerf import DeblurNerfDataset
-from datasets.hdr_deblur_nerf import HdrDeblurNerfDataset
 from datasets.traj import generate_interpolated_path
-from gsplat.rendering import rasterization
-from gsplat.strategy import DefaultStrategy, MCMCStrategy
 from pose_viewer import PoseViewer
-from nerfview.viewer import Viewer
-from simple_trainer import create_splats_with_optimizers, Runner
+from simple_trainer import Config, Runner, create_splats_with_optimizers
 from utils import (
     AppearanceOptModule,
-    BadCameraOptModule,
     CameraOptModuleSE3,
     set_random_seed,
 )
 
 
 @dataclass
-class Config:
-    # Disable viewer
-    disable_viewer: bool = False
-    # Visualize cameras in viewer
-    visualize_cameras: bool = False
-
-    # Path to the .pt file. If provide, it will skip training and render a video
-    # ckpt: Optional[str] = "results/tanabata_mcmc_500k_grad25/ckpts/ckpt_29999.pt"
-    ckpt: Optional[str] = None
+class DeblurConfig(Config):
+    # Visualize cameras in the viewer
+    visualize_cameras: bool = True
 
     # Path to the Mip-NeRF 360 dataset
     # data_dir: str = "data/360_v2/garden"
-    # data_dir: str = "/datasets/bad-gaussian/data/bad-nerf-gtK-colmap-nvs/blurtanabata"
-    data_dir: str = "/datasets/HDR-Bad-Gaussian/images_ns_process"
+    data_dir: str = "/datasets/bad-gaussian/data/bad-nerf-gtK-colmap-nvs/blurtanabata"
+
     # Downsample factor for the dataset
-    data_factor: int = 4
+    data_factor: int = 1
     # How much to scale the camera origins by. Default: 0.25 for LLFF scenes.
     scale_factor: float = 0.25
     # Directory to save results
-    # result_dir: str = "results/garden_vanilla"
-    # result_dir: str = "results/tanabata_vanilla"
-    # result_dir: str = "results/tanabata_mcmc_500k_grad25"
-    # result_dir: str = "results/tanabata_den4e-4_grad25_absgrad"
-    result_dir: str = "results/hdr_ikun_mcmc_test"
+    # result_dir: str = "results/garden"
+    result_dir: str = "results/tanabata"
     # Every N images there is a test image
     test_every: int = 8
-    # Random crop size for training  (experimental)
-    patch_size: Optional[int] = None
-    # A global scaler that applies to the scene size related parameters
-    global_scale: float = 1.0
-
-    # Port for the viewer server
-    port: int = 8080
-
-    # Batch size for training. Learning rates are scaled automatically
-    batch_size: int = 1
-    # A global factor to scale the number of training steps
-    steps_scaler: float = 1.0
 
     # Number of training steps
     max_steps: int = 30_000
@@ -83,106 +62,23 @@ class Config:
     # Steps to save the model
     save_steps: List[int] = field(default_factory=lambda: [3_000, 7_000, 10_000, 15_000, 20_000, 30_000])
 
-    # Initialization strategy
-    init_type: str = "sfm"
-    # Initial number of GSs. Ignored if using sfm
-    init_num_pts: int = 100_000
-    # Initial extent of GSs as a multiple of the camera extent. Ignored if using sfm
-    init_extent: float = 3.0
-    # Degree of spherical harmonics
-    sh_degree: int = 3
-    # Turn on another SH degree every this steps
-    sh_degree_interval: int = 1000
-    # Weight for SSIM loss
-    ssim_lambda: float = 0.2
-
-    # Near plane clipping distance
-    near_plane: float = 0.01
-    # Far plane clipping distance
-    far_plane: float = 1e10
-
-    ########### Motion Deblur ###############
-
-    # BAD-Gaussians: Number of virtual cameras
-    num_virtual_views: int = 10
-    # BAD-Gaussians: Number of control knots
-    num_control_knots: int = 2
-
-    ########### HDR ###############
-
-    # Read HDR Deblur-NeRF Dataset
-    enable_hdr_deblur: bool = True
-
-    ###### MCMC parameters ######
-
-    # whether to use MCMC
-    enable_mcmc: bool = True
-    # How much to scale the camera origins by
-    scale_factor_mcmc: float = 1.0
-    # MCMC Maximum number of GSs.
-    cap_max: int = 500_000
-    # MCMC samping noise learning rate
-    noise_lr = 5e5
-    # MCMC Opacity regularization
-    opacity_reg = 0.01
-    # MCMC Scale regularization
-    scale_reg = 0.01
-    # MCMC Initial opacity of GS
-    init_opa_mcmc: float = 0.5
-    # MCMC Initial scale of GS
-    init_scale_mcmc: float = 0.1
-    # Start refining GSs after this iteration
-    refine_start_iter_mcmc: int = 500
-    # Stop refining GSs after this iteration
-    refine_stop_iter_mcmc: int = 25_000
-    # Refine GSs every this steps
-    refine_every_mcmc: int = 100
-
-    ###### Non-MCMC parameters ######
-
-    # Initial opacity of GS
-    init_opa: float = 0.1
-    # Initial scale of GS
-    init_scale: float = 1.0
-    # GSs with opacity below this value will be pruned
-    prune_opa: float = 0.005
-    # GSs with image plane gradient above this value will be split/duplicated
-    grow_grad2d: float = 4e-3
-    # GSs with scale below this value will be duplicated. Above will be split
-    grow_scale3d: float = 0.01
-    # GSs with scale above this value will be pruned.
-    prune_scale3d: float = 0.1
-    # Start refining GSs after this iteration
-    refine_start_iter: int = 500
-    # Stop refining GSs after this iteration
-    refine_stop_iter: int = 15_000
-    # Refine GSs every this steps
-    refine_every: int = 100
-    # Reset opacities every this steps
-    reset_every: int = 3000
-    # Use absolute gradient for pruning. This typically requires larger --grow_grad2d, e.g., 0.0008 or 0.0006
-    absgrad: bool = True
-
-    ########### Rasterization ###############
-
-    # Use packed mode for rasterization, this leads to less memory usage but slightly slower.
-    packed: bool = False
-    # Use sparse gradients for optimization. (experimental)
-    sparse_grad: bool = False
-    # Anti-aliasing in rasterization. Might slightly hurt quantitative metrics.
-    antialiased: bool = False
-    # Whether to use revised opacity heuristic from arXiv:2404.06109 (experimental)
-    revised_opacity: bool = False
-
     ########### Background ###############
 
     # Use random background for training to discourage transparency
     random_bkgd: bool = True
 
+    ########### Motion Deblur ###############
+
+    # BAD-Gaussians: Bundle adjusted deblur camera optimizer
+    camera_optimizer: BadCameraOptimizerConfig = field(
+        default_factory=lambda: BadCameraOptimizerConfig(
+            mode="linear",
+            num_virtual_views=10,
+        )
+    )
+
     ########### Camera Opt ###############
 
-    # Enable camera optimization.
-    pose_opt: bool = True
     # Learning rate for camera optimization
     pose_opt_lr: float = 1e-3
     # Regularization for camera optimization as weight decay
@@ -196,8 +92,12 @@ class Config:
 
     ########### Novel View Eval Camera Opt ###############
 
-    # Steps per image to evaluate the novel view synthesis
-    nvs_steps: int = 500
+    # Enable novel view synthesis evaluation during training
+    nvs_eval_enable_during_training: bool = True
+    # Steps per image to evaluate the novel view synthesis during training
+    nvs_steps: int = 200
+    # Steps per image to evaluate the novel view synthesis in final evaluation
+    nvs_steps_final: int = 1000
     # Novel view synthesis evaluation pose learning rate
     nvs_pose_lr: float = 1e-3
     # Novel view synthesis evaluation pose regularization
@@ -205,71 +105,46 @@ class Config:
     # Novel view synthesis evaluation pose learning rate decay
     nvs_pose_lr_decay: float = 1e-2
 
-    ########### Appearance Opt ###############
+    ########### Deblurring Eval ###############
 
-    # Enable appearance optimization. (experimental)
-    app_opt: bool = False
-    # Appearance embedding dimension
-    app_embed_dim: int = 16
-    # Learning rate for appearance optimization
-    app_opt_lr: float = 1e-3
-    # Regularization for appearance optimization as weight decay
-    app_opt_reg: float = 1e-6
+    # Enable deblurring evaluation during training
+    deblur_eval_enable_during_training: bool = True
+    # Enable pose optimization in deblurring evaluation, helpful when GT sharp images are not captured exactly from the mid of the trajectory.
+    deblur_eval_enable_pose_opt: bool = False
 
-    ########### Depth Loss ###############
-
-    # Enable depth loss. (experimental)
-    depth_loss: bool = False
-    # Weight for depth loss
-    depth_lambda: float = 1e-2
-
-    ########### Logging ###############
-
-    # Dump information to tensorboard every this steps
-    tb_every: int = 100
-    # Save training images to tensorboard
-    tb_save_image: bool = False
-
-    ########### Scale Reg ###############
+    ########### Regularizations ###############
 
     # If enabled, a scale regularization introduced in PhysGauss (https://xpandora.github.io/PhysGaussian/) is used for reducing huge spikey gaussians.
-    use_scale_regularization: bool = True
+    enable_phys_scale_reg: bool = False
     # threshold of ratio of gaussian max to min scale before applying regularization loss from the PhysGaussian paper
     max_gauss_ratio: float = 10.0
+
+    # Regularizations from 3dgs-mcmc
+    enable_mcmc_opacity_reg: bool = True
+    enable_mcmc_scale_reg: bool = True
+    opacity_reg: float = 0.01
+    scale_reg: float = 0.01
 
     ######################################
 
     def __post_init__(self):
-        if self.enable_mcmc:
-            print("MCMC enabled.")
-            self.scale_factor = self.scale_factor_mcmc
-            self.init_opa = self.init_opa_mcmc
-            self.init_scale = self.init_scale_mcmc
-            self.refine_start_iter = self.refine_start_iter_mcmc
-            self.refine_stop_iter = self.refine_stop_iter_mcmc
-            self.refine_every = self.refine_every_mcmc
-        else:
-            self.grow_grad2d = self.grow_grad2d / self.num_virtual_views
-
-    def adjust_steps(self, factor: float):
-        self.eval_steps = [int(i * factor) for i in self.eval_steps]
-        self.save_steps = [int(i * factor) for i in self.save_steps]
-        self.max_steps = int(self.max_steps * factor)
-        self.sh_degree_interval = int(self.sh_degree_interval * factor)
-        self.refine_start_iter = int(self.refine_start_iter * factor)
-        self.refine_stop_iter = int(self.refine_stop_iter * factor)
-        self.reset_every = int(self.reset_every * factor)
-        self.refine_every = int(self.refine_every * factor)
+        if isinstance(self.strategy, DefaultStrategy):
+            self.strategy.grow_grad2d = self.strategy.grow_grad2d / self.camera_optimizer.num_virtual_views
 
 
 class DeblurRunner(Runner):
     """Engine for training and testing."""
 
-    def __init__(self, cfg: Config) -> None:
-        set_random_seed(42)
+    def __init__(
+        self, local_rank: int, world_rank, world_size: int, cfg: DeblurConfig
+    ) -> None:
+        set_random_seed(42 + local_rank)
 
         self.cfg = cfg
-        self.device = "cuda"
+        self.world_rank = world_rank
+        self.local_rank = local_rank
+        self.world_size = world_size
+        self.device = f"cuda:{local_rank}"
 
         # Where to dump results.
         os.makedirs(cfg.result_dir, exist_ok=True)
@@ -292,20 +167,18 @@ class DeblurRunner(Runner):
             normalize=True,
             scale_factor=cfg.scale_factor,
         )
-        if cfg.enable_hdr_deblur:
-            self.parser.test_every = 0
-            self.trainset = HdrDeblurNerfDataset(self.parser, split="all")
+        self.trainset = DeblurNerfDataset(
+            self.parser,
+            split="train",
+            patch_size=cfg.patch_size,
+            load_depths=cfg.depth_loss,
+        )
+        self.valset = DeblurNerfDataset(self.parser, split="val")
+        self.testset = DeblurNerfDataset(self.parser, split="test")
+        if len(self.valset.indices) == 0:
             self.valset = None
-            self.testset = HdrDeblurNerfDataset(self.parser, split="test")
-        else:
-            self.trainset = Dataset(
-                self.parser,
-                split="train",
-                patch_size=cfg.patch_size,
-                load_depths=cfg.depth_loss,
-            )
-            self.valset = Dataset(self.parser, split="val")
-            self.testset = DeblurNerfDataset(self.parser, split="test")
+        if len(self.testset.indices) == 0:
+            self.testset = None
         self.scene_scale = self.parser.scene_scale * 1.1 * cfg.global_scale
         print("Scene scale:", self.scene_scale)
 
@@ -324,58 +197,44 @@ class DeblurRunner(Runner):
             batch_size=cfg.batch_size,
             feature_dim=feature_dim,
             device=self.device,
+            world_rank=world_rank,
+            world_size=world_size,
         )
         print("Model initialized. Number of GS:", len(self.splats["means"]))
 
         # Densification Strategy
-        if cfg.enable_mcmc:
-            self.strategy = MCMCStrategy(
-                verbose=True,
-                cap_max=cfg.cap_max,
-                noise_lr=cfg.noise_lr,
-                refine_start_iter=cfg.refine_start_iter,
-                refine_stop_iter=cfg.refine_stop_iter,
-                refine_every=cfg.refine_every,
+        self.cfg.strategy.check_sanity(self.splats, self.optimizers)
+
+        if isinstance(self.cfg.strategy, DefaultStrategy):
+            self.strategy_state = self.cfg.strategy.initialize_state(
+                scene_scale=self.scene_scale
             )
-            self.strategy.check_sanity(self.splats, self.optimizers)
-            self.strategy_state = self.strategy.initialize_state()
+        elif isinstance(self.cfg.strategy, MCMCStrategy):
+            self.strategy_state = self.cfg.strategy.initialize_state()
         else:
-            self.strategy = DefaultStrategy(
-                verbose=True,
-                scene_scale=self.scene_scale,
-                prune_opa=cfg.prune_opa,
-                grow_grad2d=cfg.grow_grad2d,
-                grow_scale3d=cfg.grow_scale3d,
-                prune_scale3d=cfg.prune_scale3d,
-                # refine_scale2d_stop_iter=4000,  # splatfacto behavior
-                refine_start_iter=cfg.refine_start_iter,
-                refine_stop_iter=cfg.refine_stop_iter,
-                reset_every=cfg.reset_every,
-                refine_every=cfg.refine_every,
-                absgrad=cfg.absgrad,
-                revised_opacity=cfg.revised_opacity,
-            )
-            self.strategy.check_sanity(self.splats, self.optimizers)
-            self.strategy_state = self.strategy.initialize_state()
+            assert_never(self.cfg.strategy)
 
         self.pose_optimizers = []
-        if cfg.pose_opt:
-            self.pose_adjust = BadCameraOptModule(
-                len(self.trainset),
-                cfg.num_control_knots,
-                cfg.num_virtual_views
-            ).to(self.device)
-            self.pose_adjust.random_init(cfg.pose_noise)
-            self.pose_optimizers = [
-                torch.optim.Adam(
-                    self.pose_adjust.parameters(),
-                    lr=cfg.pose_opt_lr * math.sqrt(cfg.batch_size),
-                    weight_decay=cfg.pose_opt_reg,
-                )
-            ]
+        self.camera_optimizer: BadCameraOptimizer = self.cfg.camera_optimizer.setup(
+            # valset poses are not being optimized in training, but in NVS
+            num_cameras=len(self.trainset) + (len(self.valset) if self.valset else 0),
+            device=self.device,
+        )
+        camera_optimizer_param_groups = {}
+        self.camera_optimizer.get_param_groups(camera_optimizer_param_groups)
+        self.pose_optimizers = [
+            torch.optim.Adam(
+                camera_optimizer_param_groups["camera_opt"],
+                lr=cfg.pose_opt_lr * math.sqrt(cfg.batch_size),
+                weight_decay=cfg.pose_opt_reg,
+            )
+        ]
+        if world_size > 1:
+            self.camera_optimizer = DDP(self.camera_optimizer)
 
         self.app_optimizers = []
         if cfg.app_opt:
+            assert feature_dim is not None
             self.app_module = AppearanceOptModule(
                 len(self.trainset), feature_dim, cfg.app_embed_dim, cfg.sh_degree
             ).to(self.device)
@@ -393,6 +252,8 @@ class DeblurRunner(Runner):
                     lr=cfg.app_opt_lr * math.sqrt(cfg.batch_size),
                 ),
             ]
+            if world_size > 1:
+                self.app_module = DDP(self.app_module)
 
         # Losses & Metrics.
         self.ssim = StructuralSimilarityIndexMeasure(data_range=1.0).to(self.device)
@@ -417,21 +278,16 @@ class DeblurRunner(Runner):
                     mode="training",
                 )
 
-        if not cfg.enable_mcmc:
-            # Running stats for prunning & growing.
-            n_gauss = len(self.splats["means"])
-            self.running_stats = {
-                "grad2d": torch.zeros(n_gauss, device=self.device),  # norm of the gradient
-                "count": torch.zeros(n_gauss, device=self.device, dtype=torch.int),
-            }
-
     def train(self):
         cfg = self.cfg
         device = self.device
+        world_rank = self.world_rank
+        world_size = self.world_size
 
         # Dump cfg.
-        with open(f"{cfg.result_dir}/cfg.json", "w") as f:
-            json.dump(vars(cfg), f)
+        if world_rank == 0:
+            with open(f"{cfg.result_dir}/cfg.yml", "w") as f:
+                yaml.dump(vars(cfg), f)
 
         max_steps = cfg.max_steps
         init_step = 0
@@ -442,13 +298,13 @@ class DeblurRunner(Runner):
                 self.optimizers["means"], gamma=0.01 ** (1.0 / max_steps)
             ),
         ]
-        if cfg.pose_opt:
-            # pose optimization has a learning rate schedule
-            pose_scheduler = torch.optim.lr_scheduler.ExponentialLR(
-                self.pose_optimizers[0],
-                gamma=cfg.pose_opt_lr_decay ** (1.0 / max_steps)
-            )
-            schedulers.append(pose_scheduler)
+
+        # pose optimization has a learning rate schedule
+        pose_scheduler = torch.optim.lr_scheduler.ExponentialLR(
+            self.pose_optimizers[0],
+            gamma=cfg.pose_opt_lr_decay ** (1.0 / max_steps)
+        )
+        schedulers.append(pose_scheduler)
 
         trainloader = torch.utils.data.DataLoader(
             self.trainset,
@@ -492,11 +348,10 @@ class DeblurRunner(Runner):
 
             height, width = pixels.shape[1:3]
 
-            if cfg.pose_opt:
-                assert camtoworlds.shape[0] == 1
-                camtoworlds = self.pose_adjust(camtoworlds, image_ids, "uniform")[0, :, ...]
-                num_cur_virt_views = camtoworlds.shape[0]
-                Ks = Ks.tile((num_cur_virt_views, 1, 1))
+            assert camtoworlds.shape[0] == 1
+            camtoworlds = self.camera_optimizer.apply_to_cameras(camtoworlds, image_ids, "uniform")[0]  # [num_virt_views, 4, 4]
+            assert camtoworlds.shape[0] == cfg.camera_optimizer.num_virtual_views
+            Ks = Ks.tile((camtoworlds.shape[0], 1, 1))
 
             # sh schedule
             sh_degree_to_use = min(step // cfg.sh_degree_interval, cfg.sh_degree)
@@ -525,14 +380,13 @@ class DeblurRunner(Runner):
             # BAD-Gaussians: average the virtual views
             colors = colors.mean(0)[None]
 
-            if not cfg.enable_mcmc:
-                self.strategy.step_pre_backward(
-                    params=self.splats,
-                    optimizers=self.optimizers,
-                    state=self.strategy_state,
-                    step=step,
-                    info=info,
-                )
+            self.cfg.strategy.step_pre_backward(
+                params=self.splats,
+                optimizers=self.optimizers,
+                state=self.strategy_state,
+                step=step,
+                info=info,
+            )
 
             # loss
             l1loss = F.l1_loss(colors, pixels)
@@ -560,18 +414,20 @@ class DeblurRunner(Runner):
                 depthloss = F.l1_loss(disp, disp_gt) * self.scene_scale
                 loss += depthloss * cfg.depth_lambda
 
-            if cfg.enable_mcmc:
+            if cfg.enable_mcmc_opacity_reg:
                 loss = (
                         loss
                         + cfg.opacity_reg
                         * torch.abs(torch.sigmoid(self.splats["opacities"])).mean()
                 )
+
+            if cfg.enable_mcmc_scale_reg:
                 loss = (
                         loss
                         + cfg.scale_reg * torch.abs(torch.exp(self.splats["scales"])).mean()
                 )
 
-            if cfg.use_scale_regularization and step % 10 == 0:
+            if cfg.enable_phys_scale_reg and step % 10 == 0:
                 scale_exp = torch.exp(self.splats["scales"])
                 scale_reg = (
                         torch.maximum(
@@ -582,21 +438,24 @@ class DeblurRunner(Runner):
                 )
                 scale_reg = 0.1 * scale_reg.mean()
                 loss += scale_reg
-            else:
-                scale_reg = torch.tensor(0.0).to(self.device)
 
             loss.backward()
 
             desc = f"loss={loss.item():.3f}| " f"sh degree={sh_degree_to_use}| "
             if cfg.depth_loss:
                 desc += f"depth loss={depthloss.item():.6f}| "
-            if cfg.pose_opt and cfg.pose_noise:
-                # monitor the pose error if we inject noise
-                pose_err = F.l1_loss(camtoworlds_gt, camtoworlds)
-                desc += f"pose err={pose_err.item():.6f}| "
             pbar.set_description(desc)
 
-            if cfg.tb_every > 0 and step % cfg.tb_every == 0:
+            # write images (gt and render)
+            # if world_rank == 0 and step % 800 == 0:
+            #     canvas = torch.cat([pixels, colors], dim=2).detach().cpu().numpy()
+            #     canvas = canvas.reshape(-1, *canvas.shape[2:])
+            #     imageio.imwrite(
+            #         f"{self.render_dir}/train_rank{self.world_rank}.png",
+            #         (canvas * 255).astype(np.uint8),
+            #     )
+
+            if world_rank == 0 and cfg.tb_every > 0 and step % cfg.tb_every == 0:
                 mem = torch.cuda.max_memory_allocated() / 1024 ** 3
                 self.writer.add_scalar("train/loss", loss.item(), step)
                 self.writer.add_scalar("train/l1loss", l1loss.item(), step)
@@ -605,15 +464,17 @@ class DeblurRunner(Runner):
                     "train/num_GS", len(self.splats["means"]), step
                 )
                 self.writer.add_scalar("train/mem", mem, step)
+
+                # monitor camera pose optimization
+                metrics_dict = {}
+                self.camera_optimizer.get_metrics_dict(metrics_dict)
+                for k, v in metrics_dict.items():
+                    self.writer.add_scalar(f"train/{k}", v, step)
+
                 # monitor pose learning rate
                 self.writer.add_scalar("train/poseLR", pose_scheduler.get_last_lr()[0], step)
 
                 # monitor ATE
-                if cfg.pose_opt:
-                    self.writer.add_scalar("train/camera_opt_translation", self.pose_adjust.embeds.weight[:, :3].mean(),
-                                           step)
-                    self.writer.add_scalar("train/camera_opt_rotation", self.pose_adjust.embeds.weight[:, 3:].mean(),
-                                           step)
                 #     self.visualize_traj(step)
 
                 if cfg.depth_loss:
@@ -625,8 +486,45 @@ class DeblurRunner(Runner):
                     self.writer.add_image("train/render", canvas, step)
                 self.writer.flush()
 
-            if cfg.enable_mcmc:
-                self.strategy.step_post_backward(
+            # save checkpoint before updating the model
+            if step in [i - 1 for i in cfg.save_steps] or step == max_steps - 1:
+                mem = torch.cuda.max_memory_allocated() / 1024**3
+                stats = {
+                    "mem": mem,
+                    "ellipse_time": time.time() - global_tic,
+                    "num_GS": len(self.splats["means"]),
+                }
+                print("Step: ", step, stats)
+                with open(
+                    f"{self.stats_dir}/train_step{step:04d}_rank{self.world_rank}.json",
+                    "w",
+                ) as f:
+                    json.dump(stats, f)
+                data = {"step": step, "splats": self.splats.state_dict()}
+                if world_size > 1:
+                    data["camera_opt"] = self.camera_optimizer.module.state_dict()
+                else:
+                    data["camera_opt"] = self.camera_optimizer.state_dict()
+                if cfg.app_opt:
+                    if world_size > 1:
+                        data["app_module"] = self.app_module.module.state_dict()
+                    else:
+                        data["app_module"] = self.app_module.state_dict()
+                torch.save(
+                    data, f"{self.ckpt_dir}/ckpt_{step}_rank{self.world_rank}.pt"
+                )
+
+            if isinstance(self.cfg.strategy, DefaultStrategy):
+                self.cfg.strategy.step_post_backward(
+                    params=self.splats,
+                    optimizers=self.optimizers,
+                    state=self.strategy_state,
+                    step=step,
+                    info=info,
+                    packed=cfg.packed,
+                )
+            elif isinstance(self.cfg.strategy, MCMCStrategy):
+                self.cfg.strategy.step_post_backward(
                     params=self.splats,
                     optimizers=self.optimizers,
                     state=self.strategy_state,
@@ -635,14 +533,7 @@ class DeblurRunner(Runner):
                     lr=schedulers[0].get_last_lr()[0],
                 )
             else:
-                self.strategy.step_post_backward(
-                    params=self.splats,
-                    optimizers=self.optimizers,
-                    state=self.strategy_state,
-                    step=step,
-                    info=info,
-                    packed=cfg.packed,
-                )
+                assert_never(self.cfg.strategy)
 
             # Turn Gradients into Sparse Tensor before running optimizer
             if cfg.sparse_grad:
@@ -674,31 +565,15 @@ class DeblurRunner(Runner):
             for scheduler in schedulers:
                 scheduler.step()
 
-            # save checkpoint
-            if step in [i - 1 for i in cfg.save_steps] or step == max_steps - 1:
-                mem = torch.cuda.max_memory_allocated() / 1024 ** 3
-                stats = {
-                    "mem": mem,
-                    "ellipse_time": time.time() - global_tic,
-                    "num_GS": len(self.splats["means"]),
-                }
-                print("Step: ", step, stats)
-                with open(f"{self.stats_dir}/train_step{step:04d}.json", "w") as f:
-                    json.dump(stats, f)
-                torch.save(
-                    {
-                        "step": step,
-                        "splats": self.splats.state_dict(),
-                        "camera_opt": self.pose_adjust.state_dict(),
-                    },
-                    f"{self.ckpt_dir}/ckpt_{step}.pt",
-                )
-
             # eval the full set
-            if step in [i - 1 for i in cfg.eval_steps] or step == max_steps - 1:
-                self.eval_deblur(step)
-                if self.valset is not None:
-                    self.eval_novel_view(step)
+            if step in [i - 1 for i in cfg.eval_steps]:
+                if cfg.deblur_eval_enable_during_training and self.testset is not None:
+                    if cfg.deblur_eval_enable_pose_opt:
+                        self.eval_with_pose_opt(step, "deblur", self.testset)
+                    else:
+                        self.eval_deblur(step, "deblur", self.testset)
+                if cfg.nvs_eval_enable_during_training and self.valset is not None:
+                    self.eval_with_pose_opt(step, "nvs", self.valset)
                 self.render_traj(step)
 
             if not cfg.disable_viewer:
@@ -713,14 +588,16 @@ class DeblurRunner(Runner):
                 self.viewer.update(step, num_train_rays_per_step)
 
     @torch.no_grad()
-    def eval_deblur(self, step: int):
+    def eval_deblur(self, step: int, stage: str, dataset: Dataset):
         """Entry for evaluation."""
         print("Running evaluation...")
         cfg = self.cfg
         device = self.device
+        world_rank = self.world_rank
+        world_size = self.world_size
 
         testloader = torch.utils.data.DataLoader(
-            self.testset, batch_size=1, shuffle=False, num_workers=1
+            dataset, batch_size=1, shuffle=False, num_workers=1
         )
         ellipse_time = 0
         metrics = {"psnr": [], "ssim": [], "lpips": []}
@@ -731,8 +608,8 @@ class DeblurRunner(Runner):
             height, width = pixels.shape[1:3]
             image_ids = data["image_id"].to(device)
 
-            if cfg.pose_opt:
-                camtoworlds = self.pose_adjust(camtoworlds, image_ids, "mid")
+            # Apply learned mid-virtual-view pose optimizations
+            camtoworlds = self.camera_optimizer.apply_to_cameras(camtoworlds, image_ids, "mid")
 
             torch.cuda.synchronize()
             tic = time.time()
@@ -749,52 +626,54 @@ class DeblurRunner(Runner):
             torch.cuda.synchronize()
             ellipse_time += time.time() - tic
 
-            # write images
-            canvas = torch.cat([pixels, colors], dim=2).squeeze(0).cpu().numpy()
-            imageio.imwrite(
-                f"{self.render_dir}/{step:04d}_deblur_{i:04d}.png", (canvas * 255).astype(np.uint8)
+            if world_rank == 0:
+                # write images
+                canvas = torch.cat([pixels, colors], dim=2).squeeze(0).cpu().numpy()
+                imageio.imwrite(
+                    f"{self.render_dir}/{step:04d}_{stage}_{i:04d}.png", (canvas * 255).astype(np.uint8)
+                )
+
+                pixels = pixels.permute(0, 3, 1, 2)  # [1, 3, H, W]
+                colors = colors.permute(0, 3, 1, 2)  # [1, 3, H, W]
+                metrics["psnr"].append(self.psnr(colors, pixels))
+                metrics["ssim"].append(self.ssim(colors, pixels))
+                metrics["lpips"].append(self.lpips(colors, pixels))
+
+        if world_rank == 0:
+            ellipse_time /= len(testloader)
+
+            psnr = torch.stack(metrics["psnr"]).mean()
+            ssim = torch.stack(metrics["ssim"]).mean()
+            lpips = torch.stack(metrics["lpips"]).mean()
+            print(
+                f"Stage {stage} at Step_{step:04d}:"
+                f"PSNR: {psnr.item():.3f}, SSIM: {ssim.item():.4f}, LPIPS: {lpips.item():.3f} "
+                f"Time: {ellipse_time:.3f}s/image "
+                f"Number of GS: {len(self.splats['means'])}"
             )
+            # save stats as json
+            stats = {
+                "psnr": psnr.item(),
+                "ssim": ssim.item(),
+                "lpips": lpips.item(),
+                "ellipse_time": ellipse_time,
+                "num_GS": len(self.splats["means"]),
+            }
+            with open(f"{self.stats_dir}/{stage}_step{step:04d}.json", "w") as f:
+                json.dump(stats, f)
+            # save stats to tensorboard
+            for k, v in stats.items():
+                self.writer.add_scalar(f"{stage}/{k}", v, step)
+            self.writer.flush()
 
-            pixels = pixels.permute(0, 3, 1, 2)  # [1, 3, H, W]
-            colors = colors.permute(0, 3, 1, 2)  # [1, 3, H, W]
-            metrics["psnr"].append(self.psnr(colors, pixels))
-            metrics["ssim"].append(self.ssim(colors, pixels))
-            metrics["lpips"].append(self.lpips(colors, pixels))
-
-        ellipse_time /= len(testloader)
-
-        psnr = torch.stack(metrics["psnr"]).mean()
-        ssim = torch.stack(metrics["ssim"]).mean()
-        lpips = torch.stack(metrics["lpips"]).mean()
-        print(
-            f"Deblurring at Step_{step:04d}:"
-            f"PSNR: {psnr.item():.3f}, SSIM: {ssim.item():.4f}, LPIPS: {lpips.item():.3f} "
-            f"Time: {ellipse_time:.3f}s/image "
-            f"Number of GS: {len(self.splats['means'])}"
-        )
-        # save stats as json
-        stats = {
-            "psnr": psnr.item(),
-            "ssim": ssim.item(),
-            "lpips": lpips.item(),
-            "ellipse_time": ellipse_time,
-            "num_GS": len(self.splats["means"]),
-        }
-        with open(f"{self.stats_dir}/deblur_step{step:04d}.json", "w") as f:
-            json.dump(stats, f)
-        # save stats to tensorboard
-        for k, v in stats.items():
-            self.writer.add_scalar(f"deblur/{k}", v, step)
-        self.writer.flush()
-
-    def eval_novel_view(self, step: int):
+    def eval_with_pose_opt(self, step: int, stage: str, dataset: Dataset):
         """Entry for evaluation."""
         print("Running evaluation...")
         cfg = self.cfg
         device = self.device
 
         valloader = torch.utils.data.DataLoader(
-            self.valset, batch_size=1, shuffle=False, num_workers=1
+            dataset, batch_size=1, shuffle=False, num_workers=1
         )
 
         # Freeze the scene
@@ -812,22 +691,23 @@ class DeblurRunner(Runner):
 
             pixels_ = pixels.permute(0, 3, 1, 2)  # [1, 3, H, W]
 
-            novel_view_pose_adjust = CameraOptModuleSE3(1).to(self.device)
-            novel_view_pose_adjust.random_init(cfg.pose_noise)
-            novel_view_pose_optimizer = torch.optim.Adam(
-                novel_view_pose_adjust.parameters(),
+            eval_pose_adjust = CameraOptModuleSE3(1).to(self.device)
+            eval_pose_adjust.random_init(cfg.pose_noise)
+            eval_pose_optimizer = torch.optim.Adam(
+                eval_pose_adjust.parameters(),
                 lr=cfg.nvs_pose_lr * math.sqrt(cfg.batch_size),
                 weight_decay=cfg.nvs_pose_reg,
                 eps=1e-15,
             )
 
             scheduler = torch.optim.lr_scheduler.ExponentialLR(
-                novel_view_pose_optimizer,
+                eval_pose_optimizer,
                 gamma=cfg.pose_opt_lr_decay ** (1.0 / cfg.max_steps)
             )
 
-            for j in range(cfg.nvs_steps):
-                camtoworlds_new = novel_view_pose_adjust(camtoworlds, torch.tensor([0]).to(self.device))
+            NVS_STEPS = cfg.nvs_steps_final if step == cfg.max_steps - 1 else cfg.nvs_steps
+            for j in range(NVS_STEPS):
+                camtoworlds_new = eval_pose_adjust(camtoworlds, torch.tensor([0]).to(self.device))
                 colors, alphas, info = self.rasterize_splats(
                     camtoworlds=camtoworlds_new,
                     Ks=Ks,
@@ -839,7 +719,8 @@ class DeblurRunner(Runner):
                     image_ids=image_ids,
                     render_mode="RGB",
                 )
-                # colors = torch.clamp(colors, 0.0, 1.0)
+                # clamping here should be fine since we are only optimizing the camera
+                colors = torch.clamp(colors, 0.0, 1.0)
                 colors_ = colors.permute(0, 3, 1, 2)  # [1, 3, H, W]
 
                 # loss
@@ -849,18 +730,17 @@ class DeblurRunner(Runner):
 
                 loss.backward()
 
-                novel_view_pose_optimizer.step()
-                novel_view_pose_optimizer.zero_grad(set_to_none=True)
+                eval_pose_optimizer.step()
+                eval_pose_optimizer.zero_grad(set_to_none=True)
 
                 scheduler.step()
                 with torch.no_grad():
                     if j % 20 == 0:
-                        colors_ = torch.clamp(colors_, 0.0, 1.0)
                         psnr = self.psnr(colors_.detach(), pixels_)
                         ssim = self.ssim(colors_, pixels_)
                         lpips = self.lpips(colors_.detach(), pixels_)
                         print(
-                            f"NVS eval at Step_{step:04d}:"
+                            f"Stage {stage} at Step_{step:04d}:"
                             f"NVS_IMG_#{i:04d}_step_{j:04d}:"
                             f"PSNR: {psnr.item():.3f}, SSIM: {ssim.item():.4f}, LPIPS: {lpips.item():.3f} "
                         )
@@ -876,15 +756,16 @@ class DeblurRunner(Runner):
                         # }
                         # for k, v in stats.items():
                         #     self.writer.add_scalar(f"nvs/{step}/{i}/{k}", v, j)
-                        # self.writer.add_scalar(f"nvs/{step}/{i}/pose_lr", scheduler.get_last_lr()[0], j)
-                        # self.writer.add_scalar(f"nvs/{step}/{i}/camera_opt_translation", novel_view_pose_adjust.poses_opt[:, :3].mean(), j)
-                        # self.writer.add_scalar(f"nvs/{step}/{i}/camera_opt_rotation", novel_view_pose_adjust.poses_opt[:, 3:].mean(), j)
+                        # self.writer.add_scalar(f"{stage}/{step}/{i}/pose_lr", scheduler.get_last_lr()[0], j)
+                        # self.writer.add_scalar(f"{stage}/{step}/{i}/camera_opt_translation", eval_pose_adjust.poses_opt[:, :3].mean(), j)
+                        # self.writer.add_scalar(f"{stage}/{step}/{i}/camera_opt_rotation", eval_pose_adjust.poses_opt[:, 3:].mean(), j)
                         # self.writer.flush()
-                        # # write images
-                        # canvas = torch.cat([pixels, colors], dim=2).squeeze(0).detach().cpu().numpy()
-                        # imageio.imwrite(
-                        #     f"{self.render_dir}/{step:04d}_nvs_{i:04d}_{j:04d}.png", (canvas * 255).astype(np.uint8)
-                        # )
+
+            # write images
+            canvas = torch.cat([pixels, colors], dim=2).squeeze(0).detach().cpu().numpy()
+            imageio.imwrite(
+                f"{self.render_dir}/{step:04d}_{stage}_{i:04d}_{j:04d}.png", (canvas * 255).astype(np.uint8)
+            )
         psnr = torch.stack(metrics["psnr"]).mean()
         ssim = torch.stack(metrics["ssim"]).mean()
         lpips = torch.stack(metrics["lpips"]).mean()
@@ -894,11 +775,11 @@ class DeblurRunner(Runner):
             "ssim": ssim.item(),
             "lpips": lpips.item(),
         }
-        with open(f"{self.stats_dir}/nvs_step{step:04d}.json", "w") as f:
+        with open(f"{self.stats_dir}/{stage}_step{step:04d}.json", "w") as f:
             json.dump(stats, f)
         # save stats to tensorboard
         for k, v in stats.items():
-            self.writer.add_scalar(f"nvs/{k}", v, step)
+            self.writer.add_scalar(f"{stage}/{k}", v, step)
         self.writer.flush()
 
         # Unfreeze the scene
@@ -959,25 +840,29 @@ class DeblurRunner(Runner):
         writer.close()
         print(f"Video saved to {video_dir}/traj_{step}.mp4")
 
-    def _init_viewer_state(self) -> None:
-        """Initializes viewer scene with given train dataset"""
-        if not cfg.disable_viewer:
-            assert self.viewer and self.trainset
-            self.viewer.init_scene(train_dataset=self.trainset, train_state="training")
 
+def main(local_rank: int, world_rank, world_size: int, cfg: DeblurConfig):
+    if world_size > 1 and not cfg.disable_viewer:
+        cfg.disable_viewer = True
+        if world_size > 1:
+            print("Viewer is disabled in distributed training.")
 
-def main(cfg: Config):
-    runner = DeblurRunner(cfg)
+    runner = DeblurRunner(local_rank, world_rank, world_size, cfg)
 
     if cfg.ckpt is not None:
         # run eval only
         ckpt = torch.load(cfg.ckpt, map_location=runner.device)
         for k in runner.splats.keys():
             runner.splats[k].data = ckpt["splats"][k].detach().to(runner.device)
-            runner.pose_adjust.embeds.weight.data = ckpt["camera_opt"]["embeds.weight"].detach().to(runner.device)
-        runner.eval_deblur(step=ckpt["step"])
+        runner.camera_optimizer.load_state_dict(ckpt["camera_opt"])
+        if runner.testset is not None:
+            if cfg.deblur_eval_enable_pose_opt:
+                runner.eval_with_pose_opt(step=ckpt["step"], stage="deblur", dataset=runner.testset)
+            else:
+                runner.eval_deblur(step=ckpt["step"], stage="deblur", dataset=runner.testset)
         if runner.valset is not None:
-            runner.eval_novel_view(step=ckpt["step"])
+            runner.eval_with_pose_opt(step=ckpt["step"], stage="nvs", dataset=runner.valset)
+
         runner.render_traj(step=ckpt["step"])
     else:
         runner.train()
@@ -988,6 +873,37 @@ def main(cfg: Config):
 
 
 if __name__ == "__main__":
-    cfg = tyro.cli(Config)
+    """
+    Usage:
+    ```bash
+    # Single GPU training
+    CUDA_VISIBLE_DEVICES=0 python simple_trainer.py default
+    # Distributed training on 4 GPUs: Effectively 4x batch size so run 4x less steps.
+    CUDA_VISIBLE_DEVICES=0,1,2,3 python simple_trainer.py default --steps_scaler 0.25
+    """
+
+    # Config objects we can choose between.
+    # Each is a tuple of (CLI description, config object).
+    configs = {
+        "default": (
+            "Gaussian splatting training using densification heuristics from the original paper.",
+            DeblurConfig(
+                strategy=DefaultStrategy(
+                    verbose=True,
+                    grow_grad2d=1e-2,
+                ),
+            ),
+        ),
+        "mcmc": (
+            "Gaussian splatting training using densification from the paper '3D Gaussian Splatting as Markov Chain Monte Carlo'.",
+            DeblurConfig(
+                init_opa=0.5,
+                init_scale=0.1,
+                strategy=MCMCStrategy(verbose=True, cap_max=500_000),
+            ),
+        ),
+    }
+
+    cfg = tyro.extras.overridable_config_cli(configs)
     cfg.adjust_steps(cfg.steps_scaler)
-    main(cfg)
+    cli(main, cfg, verbose=True)

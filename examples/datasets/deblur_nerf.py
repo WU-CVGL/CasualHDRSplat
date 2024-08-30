@@ -19,8 +19,7 @@ def _find_files(directory: Path, exts: List[str]) -> List[Path]:
     Returns:
         A list of file paths for all the files that were found. The list is sorted alphabetically.
     """
-    assert directory.exists()
-    if os.path.isdir(directory):
+    if directory.exists() and os.path.isdir(directory):
         # types should be ['*.png', '*.jpg', '*.JPG', '*.PNG']
         files_grabbed = []
         for ext in exts:
@@ -42,21 +41,49 @@ class DeblurNerfDataset(Dataset):
             patch_size: Optional[int] = None,
             load_depths: bool = False,
     ):
+        # find the file named `hold=n` , n is the eval_interval to be recognized
+        hold_file = [f for f in os.listdir(parser.data_dir) if f.startswith('hold=')]
+        if len(hold_file) == 0:
+            print(f"[INFO] defaulting hold={parser.test_every}")
+        else:
+            parser.test_every = int(hold_file[0].split('=')[-1])
+            print(f"[INFO] found hold={parser.test_every}")
+
+        if split == "train" and parser.test_every < 1:
+            split = "all"
+
         super().__init__(parser, split, patch_size, load_depths)
-        if split == "test":
+
+        # "test" for deblur, "val" for novel-view
+        if split == "val" and parser.test_every < 1:
+            self.indices = []
+            return
+
+        if split == "val" or split == "test":
             self.parser = deepcopy(parser)
             if self.parser.factor > 1:
                 image_dir_suffix = f"_{self.parser.factor}"
             else:
                 image_dir_suffix = ""
             gt_dir = parser.data_dir / ("images_test" + image_dir_suffix)
-            gt_image_paths = _find_files(gt_dir, ["*.png", "*.jpg", "*.JPG", "*.PNG"])
-            num_gt_images = len(gt_image_paths)
-            indices = np.arange(len(self.parser.image_names))
-            self.indices = indices if parser.test_every < 1 else indices[
-                indices % self.parser.test_every != 0
-                ]
-            assert num_gt_images == 0 or num_gt_images == len(self.parser.image_names)
-            self.parser.image_paths = gt_image_paths
-        else:
-            self.parser = parser
+
+            if gt_dir.exists():
+                # Will find both deblurring & NVS eval image files in `images_test` folder.
+                gt_image_paths = _find_files(gt_dir, ["*.png", "*.jpg", "*.JPG", "*.PNG"])
+                num_gt_images = len(gt_image_paths)
+                indices = np.arange(num_gt_images)
+                self.indices = indices if parser.test_every < 1 else indices[
+                    indices % self.parser.test_every != 0 if split == "test" else
+                        indices % self.parser.test_every == 0
+                    ]
+                assert num_gt_images == 0 or num_gt_images == len(self.parser.image_names)
+                self.parser.image_paths = gt_image_paths
+                self.parser.image_names = [image_path.stem for image_path in gt_image_paths]
+            else:
+                if split == "test":
+                    # No deblurring eval images found
+                    self.indices = []
+                    return
+                elif split == "val":
+                    # Fallback to original Dataset split. Will find NVS eval image files in `images` folder.
+                    self.parser = parser

@@ -46,6 +46,7 @@ class BadCameraOptModule(torch.nn.Module):
         # embed_ids: (..., num_control_knots)
         embed_ids = camera_ids * self.num_control_knots + torch.arange(self.num_control_knots, device=camera_ids.device)
         batch_shape = camtoworlds.shape[:-2]
+        # assert torch.all(embed_ids < self.num_cameras * self.num_control_knots)
         pose_deltas = self.embeds(embed_ids)
         # (..., 7) to (..., num_control_knots, 7)
         pose_deltas = pose_deltas.reshape(*batch_shape, self.num_control_knots, self.dof)

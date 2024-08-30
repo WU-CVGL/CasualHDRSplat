@@ -1,6 +1,3 @@
-import sys
-sys.path.append('/run/determined/workdir/home/gsplat/examples')
-
 from pathlib import Path
 from typing import List, Literal
 
@@ -183,7 +180,7 @@ class ColmapParser:
         colmap_files = sorted(_get_rel_paths(colmap_image_dir))
         image_files = sorted(_get_rel_paths(image_dir))
         colmap_to_image = dict(zip(colmap_files, image_files))
-        image_paths = [os.path.join(image_dir, colmap_to_image[f]) for f in image_names]
+        image_paths = [os.path.join(image_dir, colmap_to_image[f]) for f in colmap_files]
 
         # get masks path
         if os.path.exists(mask_dir):
@@ -211,13 +208,13 @@ class ColmapParser:
             camtoworlds_gt = np.linalg.inv(w2c_mats_gt)
             camtoworlds_gt = camtoworlds_gt[inds]
             camtoworlds_gt, _ = auto_orient_and_center_poses(
-            camtoworlds_gt, 
+            camtoworlds_gt,
             method=orientation_method,
             center_method=center_method
             )
             scale_factor_gt = 1.0
             if auto_scale_poses:
-                scale_factor_gt /= float(np.max(np.abs(camtoworlds_gt[:, :3, 3]))) 
+                scale_factor_gt /= float(np.max(np.abs(camtoworlds_gt[:, :3, 3])))
             scale_factor_gt *= self.scale_factor
             camtoworlds_gt[:, :3, 3] *= scale_factor_gt
             camtoworlds_gt = np.concatenate((camtoworlds_gt, bottoms), axis=1)
@@ -290,27 +287,36 @@ class ColmapParser:
         dists = np.linalg.norm(camera_locations - scene_center, axis=1)
         self.scene_scale = np.max(dists)
 
+        # BAD-Gaussians: Check if the colmap outputs are estimated on downscaled data.
+        # If so, correct the camera parameters. E.g., ball sequence in Deblur-NeRF dataset.
+        image = cv2.imread(image_paths[0])  # load the first image to get the image size
+        h, w = image.shape[:2]
+        # check if the cx and cy are in the correct range
+        ideal_cx = w / 2.0
+        ideal_cy = h / 2.0
 
-if __name__ == "__main__":
-    parser = ColmapParser(data_dir=Path('/run/determined/workdir/home/gsplat/examples/data/sci_nerf/colmap/hotdog'))
-    
-    c2ws = parser.camtoworlds
-    c2ws_gt = parser.camtoworlds_gt
+        def find_int_scale_factor(scaled):
+            if scaled < 1:
+                scale = round(1 / scaled)
+            else:
+                scale = 1 / round(scaled)
+            return scale
 
-    traj1 = c2ws_gt[:, :3, -1]
-    traj2 = c2ws[:, :3, -1]
-
-    # plot them before alignment
-    plot_trajectories3D(traj1, traj2, filename="trajs_before_align.png")
-
-    # align w/ SIM3
-    s, R, t = align_umeyama(traj1, traj2)
-
-    # apply transformation on the data (traj2)
-    traj2_aligned = (s * (R @ traj2.T)).T + t
-
-    # plot them post alignment
-    plot_trajectories3D(traj1, traj2_aligned, filename="trajs_after_align.png")
-
-    e_trans, _ = compute_absolute_error_translation(traj2_aligned, traj1)
-    print(f"ATE for translation vector is {e_trans}")
+        cx_0 = list(Ks_dict.values())[0][0, 2]
+        cy_0 = list(Ks_dict.values())[0][1, 2]
+        if not abs(cx_0 - ideal_cx) / ideal_cx < 0.3:
+            x_scale = cx_0 / ideal_cx
+            print(f"[WARN] cx is away from the center of the image, correcting... cx scale: {x_scale}")
+            scale = find_int_scale_factor(x_scale)
+            for cam_id in Ks_dict.keys():
+                Ks_dict[cam_id][0, 0] *= scale  # fx
+                Ks_dict[cam_id][0, 2] *= scale  # cx
+                imsize_dict[cam_id] = imsize_dict[cam_id][0] * scale, imsize_dict[cam_id][1]
+        if not abs(cy_0 - ideal_cy) / ideal_cy < 0.3:
+            y_scale = cy_0 / ideal_cy
+            print(f"[WARN] cy is away from the center of the image, correcting... cy scale: {y_scale}")
+            scale = find_int_scale_factor(y_scale)
+            for cam_id in Ks_dict.keys():
+                Ks_dict[cam_id][1, 1] *= scale  # fy
+                Ks_dict[cam_id][1, 2] *= scale  # cy
+                imsize_dict[cam_id] = imsize_dict[cam_id][0], imsize_dict[cam_id][1] * scale
