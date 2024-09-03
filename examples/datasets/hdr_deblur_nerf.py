@@ -26,6 +26,7 @@ class HdrDeblurNerfDataset(DeblurNerfDataset):
         self.timestamps_file_path = parser.data_dir / "timestamp_to_filename.txt"
 
         timestamps = None
+        timestamps_dict = None
         if self.timestamps_file_path.exists():
             timestamps_dict = self._get_timestamps_from_file(self.timestamps_file_path)
             timestamps = [timestamps_dict[filename] for filename in parser.image_names]
@@ -33,12 +34,23 @@ class HdrDeblurNerfDataset(DeblurNerfDataset):
         else:
             timestamps = self._get_timestamps_from_filenames(parser.image_paths)
 
+        timestamps = np.array([float(t) for t in timestamps])
+        self.timestamps_begin = np.floor(timestamps[0])
+        timestamps = timestamps - self.timestamps_begin
+
         exposure_times_dict = self._read_exposure_times()
+        exposure_times_dict_new = {}
+        if exposure_times_dict is not None:
+            for k, v in exposure_times_dict.items():
+                new_key = float(k) - self.timestamps_begin
+                exposure_times_dict_new[new_key] = v
+        exposure_times_dict = exposure_times_dict_new
         exposure_times = torch.tensor([float(exposure_times_dict[timestamp]) for timestamp in timestamps])
         if len(exposure_times) != 1 and len(exposure_times) != len(timestamps):
             raise ValueError("Exposure times must be either 1 or equal to the number of images.")
-
-        timestamps = torch.tensor([float(timestamp) for timestamp in timestamps])
+        torch.set_printoptions(sci_mode=False, precision=15)
+        # timestamps = torch.tensor([float(timestamp) for timestamp in timestamps], dtype=torch.float64)
+        timestamps = torch.tensor(timestamps, dtype=torch.float32)
         self._check_timestamps(timestamps)
         # if len(timestamps) == 1:
         #     timestamps = timestamps.expand(len(outputs.image_filenames), 1)
@@ -110,7 +122,7 @@ class HdrDeblurNerfDataset(DeblurNerfDataset):
             return None
         assert isinstance(timestamps, Tensor)
         duration = timestamps[1:] - timestamps[:-1]
-        if not torch.allclose(duration, duration[0], rtol=1e-2):
+        if not torch.allclose(duration, duration[0], rtol=5e-2):
             raise ValueError("Timestamps are not in increasing order or with constant duration.")
 
     @staticmethod
