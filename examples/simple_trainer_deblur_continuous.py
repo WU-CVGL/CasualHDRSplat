@@ -56,8 +56,8 @@ class DeblurConfig(Config):
     # data_dir: str = "data/360_v2/garden"
     # data_dir: str = "/datasets/bad-gaussian/data/bad-nerf-gtK-colmap-nvs/blurtanabata"
     # data_dir: str = "/datasets/HDR-Bad-Gaussian/bags/toufu3/toufu3/process"
-    data_dir: str = "/home/lzzhao/ws/DPVO/results/toufu3_dpvslam"
-    # data_dir: str = "/datasets/HDR-Bad-Gaussian/scene0489_02/dpvslam"
+    # data_dir: str = "/home/lzzhao/ws/DPVO/results/toufu3_dpvslam"
+    data_dir: str = "/datasets/HDR-Bad-Gaussian/scannet_restored/scene0077_00/dpvslam"
     # data_dir: str = "/home/cvgluser/blender/blender-3.6.13-linux-x64/data/deblurnerf/rawdata_new_tra1/cozyroom/process"
 
     # Downsample factor for the dataset
@@ -70,8 +70,8 @@ class DeblurConfig(Config):
     # result_dir: str = "results/tanabata_mcmc_500k_grad25"
     # result_dir: str = "results/tanabata_den4e-4_grad25_absgrad"
     # result_dir: str = "results/hdr_ikun_mcmc_500k_grad25_explr_1e-4"
-    result_dir: str = "results/toufu3_dpvslam"
-    # result_dir: str = "results/scene0489_02_dpvslam_debug"
+    # result_dir: str = "results/toufu3_dpvslam"
+    result_dir: str = "results/scannet_restored/scene0077_00_dpvslam_debug"
     # Every N images there is a test image
     test_every: int = 9999
 
@@ -190,8 +190,7 @@ class DeblurConfig(Config):
     ########### HDR Tone Mapping ###############
 
     use_HDR: bool = True
-    # k_times: float = 32.0
-    k_times = float([f for f in os.listdir(data_dir) if f.startswith('k_times=')][0].split('=')[1])
+    k_times: float = 1.0
     tonemapper_lr: float = 0.005
 
     tonemapper_reg: float = 1e-6
@@ -218,6 +217,8 @@ class DeblurRunner(Runner):
         self.local_rank = local_rank
         self.world_size = world_size
         self.device = f"cuda:{local_rank}"
+
+        self.cfg.k_times = float([f for f in os.listdir(self.cfg.data_dir) if f.startswith('k_times=')][0].split('=')[1])
 
         # Where to dump results.
         os.makedirs(cfg.result_dir, exist_ok=True)
