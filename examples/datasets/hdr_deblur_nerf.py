@@ -18,6 +18,7 @@ class HdrDeblurNerfDataset(DeblurNerfDataset):
             split: str = "train",
             patch_size: Optional[int] = None,
             load_depths: bool = False,
+            frame_rate: Optional[float] = 30,
     ):
         super().__init__(parser, split, patch_size, load_depths)
 
@@ -32,24 +33,36 @@ class HdrDeblurNerfDataset(DeblurNerfDataset):
             timestamps = [timestamps_dict[filename] for filename in parser.image_names]
             assert len(timestamps) == len(parser.image_paths)
         else:
-            timestamps = self._get_timestamps_from_filenames(parser.image_paths)
+            try:
+                timestamps = self._get_timestamps_from_filenames(parser.image_paths)
+            except ValueError as e:
+                print(f"[WARN] {e}")
+                print(f"[WARN] Using framerate {frame_rate} to generate timestamps.")
+                timestamps = np.arange(len(parser.image_paths)) / frame_rate
 
         timestamps = np.array([float(t) for t in timestamps])
         self.timestamps_begin = np.floor(timestamps[0])
         timestamps = timestamps - self.timestamps_begin
 
-        exposure_times_dict = self._read_exposure_times()
-        exposure_times_dict_new = {}
-        if exposure_times_dict is not None:
-            for k, v in exposure_times_dict.items():
-                new_key = float(k) - self.timestamps_begin
-                exposure_times_dict_new[new_key] = v
-        exposure_times_dict = exposure_times_dict_new
-        exposure_times = torch.tensor([float(exposure_times_dict[timestamp]) for timestamp in timestamps])
-        if len(exposure_times) != 1 and len(exposure_times) != len(timestamps):
-            raise ValueError("Exposure times must be either 1 or equal to the number of images.")
-        torch.set_printoptions(sci_mode=False, precision=15)
-        # timestamps = torch.tensor([float(timestamp) for timestamp in timestamps], dtype=torch.float64)
+        try:
+            exposure_times_dict = self._read_exposure_times()
+        except FileNotFoundError:
+            print("[WARN] Exposure times file not found.")
+            print("[WARN] Using default exposure times. (1/frame_rate)")
+            exposure_times = torch.tensor([1 / frame_rate] * len(timestamps))
+        else:
+            exposure_times_dict_new = {}
+            if exposure_times_dict is not None:
+                for k, v in exposure_times_dict.items():
+                    new_key = float(k) - self.timestamps_begin
+                    exposure_times_dict_new[new_key] = v
+            exposure_times_dict = exposure_times_dict_new
+            exposure_times = torch.tensor([float(exposure_times_dict[timestamp]) for timestamp in timestamps])
+            if len(exposure_times) != len(timestamps):
+                raise ValueError("[ERROR] Exposure times must be equal to the number of images.")
+            torch.set_printoptions(sci_mode=False, precision=15)
+            # timestamps = torch.tensor([float(timestamp) for timestamp in timestamps], dtype=torch.float64)
+
         timestamps = torch.tensor(timestamps, dtype=torch.float32)
         self._check_timestamps(timestamps)
         # if len(timestamps) == 1:
@@ -111,6 +124,12 @@ class HdrDeblurNerfDataset(DeblurNerfDataset):
         for filename in filenames:
             timestamp = Path(filename).stem
             timestamps.append(timestamp)
+        # check if the timestamps can be converted to float
+        for timestamp in timestamps:
+            try:
+                float(timestamp)
+            except ValueError:
+                raise ValueError(f"Invalid timestamp: {timestamp}")
         return timestamps
 
     @staticmethod

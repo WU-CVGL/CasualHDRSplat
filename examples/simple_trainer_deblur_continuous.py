@@ -55,11 +55,13 @@ class DeblurConfig(Config):
     # Path to the Mip-NeRF 360 dataset
     # data_dir: str = "data/360_v2/garden"
     # data_dir: str = "/datasets/bad-gaussian/data/bad-nerf-gtK-colmap-nvs/blurtanabata"
-    data_dir: str = "/datasets/HDR-Bad-Gaussian/images_ns_process"
+    # data_dir: str = "/datasets/HDR-Bad-Gaussian/bags/toufu3/toufu3/process"
+    # data_dir: str = "/home/lzzhao/ws/DPVO/toufu3"
+    data_dir: str = "/datasets/HDR-Bad-Gaussian/scene0489_02/dpvslam"
     # data_dir: str = "/home/cvgluser/blender/blender-3.6.13-linux-x64/data/deblurnerf/rawdata_new_tra1/cozyroom/process"
 
     # Downsample factor for the dataset
-    data_factor: int = 1
+    data_factor: int = 4
     # How much to scale the camera origins by. Default: 0.25 for LLFF scenes.
     scale_factor: float = 0.25
     # Directory to save results
@@ -68,7 +70,7 @@ class DeblurConfig(Config):
     # result_dir: str = "results/tanabata_mcmc_500k_grad25"
     # result_dir: str = "results/tanabata_den4e-4_grad25_absgrad"
     # result_dir: str = "results/hdr_ikun_mcmc_500k_grad25_explr_1e-4"
-    result_dir: str = "results/debug"
+    result_dir: str = "results/scene0489_02_dpvslam_debug"
     # Every N images there is a test image
     test_every: int = 9999
 
@@ -83,7 +85,7 @@ class DeblurConfig(Config):
     # Number of training steps
     max_steps: int = 30_000
     # Steps to evaluate the model
-    eval_steps: List[int] = field(default_factory=lambda: [5_000, 10_000, 15_000, 20_000, 30_000])
+    eval_steps: List[int] = field(default_factory=lambda: [500, 3_000, 5_000, 10_000, 15_000, 20_000, 30_000])
     # Steps to save the model
     save_steps: List[int] = field(default_factory=lambda: [5_000, 10_000, 15_000, 20_000, 30_000])
 
@@ -322,11 +324,12 @@ class DeblurRunner(Runner):
             lr=cfg.pose_opt_lr * math.sqrt(cfg.batch_size),
             weight_decay=cfg.pose_opt_reg,
         )
-        self.exposure_time_optimizer = torch.optim.Adam(
-            camera_trajectory_param_groups["exposure_time_opt"],
-            lr=cfg.exposure_time_lr * math.sqrt(cfg.batch_size),
-            weight_decay=cfg.exposure_time_reg,
-        )
+        if self.cfg.optimize_exposure_time:
+            self.exposure_time_optimizer = torch.optim.Adam(
+                camera_trajectory_param_groups["exposure_time_opt"],
+                lr=cfg.exposure_time_lr * math.sqrt(cfg.batch_size),
+                weight_decay=cfg.exposure_time_reg,
+            )
         if world_size > 1:
             self.camera_trajectory = DDP(self.camera_trajectory)
 
@@ -499,7 +502,7 @@ class DeblurRunner(Runner):
             schedulers.append(exposure_time_scheduler)
         if cfg.use_HDR:
             tonemapper_scheduler = torch.optim.lr_scheduler.ExponentialLR(
-                self.exposure_time_optimizer,
+                self.tonemapper_optimizer,
                 gamma=cfg.tonemapper_lr_decay ** (1.0 / max_steps),
             )
             schedulers.append(tonemapper_scheduler)
@@ -815,7 +818,9 @@ class DeblurRunner(Runner):
                         self.eval_deblur(step, "deblur", self.testset)
                 if cfg.nvs_eval_enable_during_training and self.valset is not None:
                     self.eval_with_pose_opt(step, "nvs", self.valset)
-                self.render_traj(step)
+
+                # FIXME: SLOW! (0.5fps)
+                # self.render_traj(step)
 
             if not cfg.disable_viewer:
                 self.viewer.lock.release()
@@ -934,6 +939,7 @@ class DeblurRunner(Runner):
         if cfg.use_HDR:
             for param_group in self.tonemapper_optimizer.param_groups:
                 param_group["params"][0].requires_grad = False
+        if cfg.optimize_exposure_time:
             for param_group in self.exposure_time_optimizer.param_groups:
                 param_group["params"][0].requires_grad = False
 
@@ -1063,6 +1069,7 @@ class DeblurRunner(Runner):
         if cfg.use_HDR:
             for param_group in self.tonemapper_optimizer.param_groups:
                 param_group["params"][0].requires_grad = True
+        if cfg.optimize_exposure_time:
             for param_group in self.exposure_time_optimizer.param_groups:
                 param_group["params"][0].requires_grad = True
 
@@ -1122,7 +1129,7 @@ class DeblurRunner(Runner):
 
     def _init_viewer_state(self) -> None:
         """Initializes viewer scene with given train dataset"""
-        if not cfg.disable_viewer:
+        if not self.cfg.disable_viewer:
             assert self.viewer and self.trainset
             self.viewer.init_scene(train_dataset=self.trainset, train_state="training")
 
