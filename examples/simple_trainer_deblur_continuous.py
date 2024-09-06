@@ -56,12 +56,12 @@ class DeblurConfig(Config):
     # data_dir: str = "data/360_v2/garden"
     # data_dir: str = "/datasets/bad-gaussian/data/bad-nerf-gtK-colmap-nvs/blurtanabata"
     # data_dir: str = "/datasets/HDR-Bad-Gaussian/bags/toufu3/toufu3/process"
-    # data_dir: str = "/home/lzzhao/ws/DPVO/toufu3"
-    data_dir: str = "/datasets/HDR-Bad-Gaussian/scene0489_02/dpvslam"
+    data_dir: str = "/home/lzzhao/ws/DPVO/results/toufu3_dpvslam"
+    # data_dir: str = "/datasets/HDR-Bad-Gaussian/scene0489_02/dpvslam"
     # data_dir: str = "/home/cvgluser/blender/blender-3.6.13-linux-x64/data/deblurnerf/rawdata_new_tra1/cozyroom/process"
 
     # Downsample factor for the dataset
-    data_factor: int = 4
+    data_factor: int = 2
     # How much to scale the camera origins by. Default: 0.25 for LLFF scenes.
     scale_factor: float = 0.25
     # Directory to save results
@@ -70,7 +70,8 @@ class DeblurConfig(Config):
     # result_dir: str = "results/tanabata_mcmc_500k_grad25"
     # result_dir: str = "results/tanabata_den4e-4_grad25_absgrad"
     # result_dir: str = "results/hdr_ikun_mcmc_500k_grad25_explr_1e-4"
-    result_dir: str = "results/scene0489_02_dpvslam_debug"
+    result_dir: str = "results/toufu3_dpvslam"
+    # result_dir: str = "results/scene0489_02_dpvslam_debug"
     # Every N images there is a test image
     test_every: int = 9999
 
@@ -181,6 +182,10 @@ class DeblurConfig(Config):
 
     # Read HDR Deblur-NeRF Dataset
     enable_hdr_deblur: bool = True
+    # valuation images at the beginning of the dataset
+    valstart: int = 5
+    # valuation images at the end of the dataset
+    valend: int = 5
 
     ########### HDR Tone Mapping ###############
 
@@ -237,8 +242,8 @@ class DeblurRunner(Runner):
         )
         if cfg.enable_hdr_deblur:
             self.parser.test_every = 0
-            self.parser.valstart = 2
-            self.parser.valend = 2
+            self.parser.valstart = cfg.valstart
+            self.parser.valend = cfg.valend
             self.trainset = HdrDeblurNerfDataset(self.parser, split="all")
             self.valset = HdrDeblurNerfDataset(self.parser, split="val")#novel view
             self.testset = HdrDeblurNerfDataset(self.parser, split="test")
