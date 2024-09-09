@@ -5,11 +5,11 @@ import numpy as np
 import torch
 from torch import Tensor
 
+from .colmap import Dataset
 from .colmap_dataparser import ColmapParser
-from .deblur_nerf import DeblurNerfDataset
 
 
-class HdrDeblurNerfDataset(DeblurNerfDataset):
+class HdrDeblurNerfDataset(Dataset):
     """HDR DeblurNerf dataset class."""
 
     def __init__(
@@ -77,7 +77,7 @@ class HdrDeblurNerfDataset(DeblurNerfDataset):
         else:
             self.indices = self.indices[self.parser.valstart:-self.parser.valend]
             # Drop first and last images before we implement the spline extrapolation.
-            self.indices = self.indices[2:-2]
+            # self.indices = self.indices[2:-2]
 
     def __getitem__(self, item: int) -> Dict[str, Any]:
         data = super().__getitem__(item)
