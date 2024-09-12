@@ -17,3 +17,5 @@ tensorboard
 pyyaml
 seaborn
 pypose
+matplotlib
+git+https://github.com/rahul-goel/fused-ssim@84422e0da94c516220eb3acedb907e68809e9e01
