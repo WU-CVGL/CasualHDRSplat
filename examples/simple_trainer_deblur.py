@@ -3,6 +3,7 @@ import math
 import os
 import time
 import yaml
+from pathlib import Path
 from typing import List
 from typing_extensions import assert_never
 
@@ -133,6 +134,8 @@ class DeblurConfig(Config):
     ######################################
 
     def __post_init__(self):
+        timestr = time.strftime("%Y%m%d-%H%M%S")
+        self.result_dir = Path(self.result_dir) / timestr
         if isinstance(self.strategy, DefaultStrategy):
             self.strategy.grow_grad2d = self.strategy.grow_grad2d / self.camera_optimizer.num_virtual_views
 

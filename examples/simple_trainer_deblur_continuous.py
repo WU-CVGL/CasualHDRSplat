@@ -2,6 +2,7 @@ import json
 import math
 import os
 import time
+from pathlib import Path
 from typing import Dict, List, Literal, Optional, Tuple
 from typing_extensions import assert_never
 
@@ -58,8 +59,9 @@ class DeblurConfig(Config):
     # data_dir: str = "/datasets/bad-gaussian/data/bad-nerf-gtK-colmap-nvs/blurtanabata"
     # data_dir: str = "/datasets/HDR-Bad-Gaussian/bags/toufu3/toufu3/process"
     # data_dir: str = "/home/lzzhao/ws/DPVO/results/toufu3_dpvslam"
-    data_dir: str = "/datasets/HDR-Bad-Gaussian/scannet_restored/scene0072_01/dpvslam"
     # data_dir: str = "/home/cvgluser/blender/blender-3.6.13-linux-x64/data/deblurnerf/rawdata_new_tra1/cozyroom/process"
+    # data_dir: str = "/datasets/HDR-Bad-Gaussian/scannet_restored/scene0072_01/dpvslam"
+    data_dir: str = "/datasets/HDR-Bad-Gaussian/pixel8pro/processed_2024_09_15_22_47_01-0/dpvslam"
 
     # Downsample factor for the dataset
     data_factor: int = 2
@@ -72,7 +74,7 @@ class DeblurConfig(Config):
     # result_dir: str = "results/tanabata_den4e-4_grad25_absgrad"
     # result_dir: str = "results/hdr_ikun_mcmc_500k_grad25_explr_1e-4"
     # result_dir: str = "results/toufu3_dpvslam"
-    result_dir: str = "results/scannet_restored/scene0072_01_dpvslam_debug_fused-ssim"
+    result_dir: str = "results/pixel8pro/2024_09_15_22_47_01_debug"
     # Every N images there is a test image
     test_every: int = 9999
 
@@ -201,6 +203,8 @@ class DeblurConfig(Config):
     ######################################
 
     def __post_init__(self):
+        timestr = time.strftime("%Y%m%d-%H%M%S")
+        self.result_dir = Path(self.result_dir) / timestr
         if isinstance(self.strategy, DefaultStrategy):
             self.strategy.grow_grad2d = self.strategy.grow_grad2d / self.num_virtual_views
 

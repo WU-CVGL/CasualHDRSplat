@@ -5,11 +5,12 @@ Created by lzzhao on 2024.04.30
 """
 from __future__ import annotations
 
-from copy import deepcopy
 from math import ceil
 from typing import Literal, Tuple, Optional, Type, Union
 
 import pypose as pp
+import splines
+import splines.quaternion
 import torch
 from dataclasses import dataclass, field
 from jaxtyping import Float, Int
@@ -75,26 +76,37 @@ class CameraTrajectory(nn.Module):
         self.device = device
         self.timestamps = timestamps
 
-        # Spline
-        self.config.spline.start_time = timestamps[0].item()
-        self.frame_interval: float = (timestamps[1] - timestamps[0]).item()
-
-        # temporary spline to interpolate for the camera trajectory initialization
-        temp_spline_config = deepcopy(self.config.spline)
-        temp_spline_config.sampling_interval = self.frame_interval
-        temp_spline_config.spline_optimizer.mode = "off"
-        temp_spline = temp_spline_config.setup(
-            max_knots=len(c2ws),
-            device=device,
+        # First initialize a temporary spline to interpolate on, and assume it non-uniform
+        self.start_time = timestamps[0].item()
+        self.end_time = timestamps[-1].item()
+        self.frame_interval: float = torch.mean(torch.diff(timestamps)).item()
+        self.fps = 1.0 / self.frame_interval
+        pos_spline = splines.KochanekBartels(
+            c2ws[:, :3, 3].cpu().numpy(),
+            grid=timestamps.cpu().numpy(),
+            tcb=(0, 0, 0),
+            endconditions="natural"
         )
-        temp_spline.set_data(pp.mat2SE3(c2ws).to(device))
+        rot_spline = splines.quaternion.KochanekBartels(
+            [
+                splines.quaternion.UnitQuaternion.from_unit_xyzw(
+                    pp.mat2SO3(rot).to("cpu").numpy()
+                )
+                for rot in c2ws[:, :3, :3].cpu().numpy()
+            ],
+            grid=timestamps.cpu().numpy(),
+            tcb=(0, 0, 0),
+            endconditions="natural"
+        )
 
-        # Spline
+        # Our new optimizable cubic B-spline
+        self.config.spline.start_time = self.start_time
         spline_timestamps = torch.linspace(  # TODO: implement extrapolate
-            timestamps[1].item(),
-            timestamps[-2].item(),
+            self.start_time,
+            self.end_time,
             int(ceil(len(c2ws) * self.config.traj_interpolate_ratio))
-        )  # type: ignore
+        )
+        spline_timestamps_numpy = spline_timestamps.cpu().numpy()
         self.config.spline.sampling_interval = self.frame_interval / self.config.traj_interpolate_ratio
         self.spline = self.config.spline.setup(
             max_knots=len(spline_timestamps),
@@ -104,8 +116,17 @@ class CameraTrajectory(nn.Module):
             0, 1, self.config.num_virtual_views, device="cpu"
         )
 
-        # Spline poses
-        self.poses = temp_spline(spline_timestamps).to(device)
+        # Initialize our spline from the temporary spline, with traj_interpolate_ratio
+        positions_xyz = torch.tensor(pos_spline.evaluate(spline_timestamps_numpy))
+        orientations_xyzw = rot_spline.evaluate(spline_timestamps_numpy)
+        assert isinstance(orientations_xyzw[0], splines.quaternion.UnitQuaternion)
+        orientations_xyzw = torch.stack(
+            [torch.tensor([*q.vector, q.scalar]) for q in orientations_xyzw],
+            axis=0
+        )
+        self.poses = pp.SE3(
+            torch.cat([positions_xyz, orientations_xyzw], dim=-1)
+        ).float().to(device)
         self.spline.set_data(self.poses)
 
         # Exposure times
