@@ -48,8 +48,8 @@ class HdrDeblurNerfDataset(Dataset):
             exposure_times_dict = self._read_exposure_times()
         except FileNotFoundError:
             print("[WARN] Exposure times file not found.")
-            print("[WARN] Using default exposure times. (1/frame_rate)")
-            exposure_times = torch.tensor([1 / frame_rate] * len(timestamps))
+            print("[WARN] Using default exposure time: 0.5 / frame_rate)")
+            exposure_times = torch.tensor([0.5 / frame_rate] * len(timestamps))
         else:
             exposure_times_dict_new = {}
             if exposure_times_dict is not None:
