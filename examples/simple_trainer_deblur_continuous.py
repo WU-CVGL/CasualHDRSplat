@@ -203,10 +203,13 @@ class DeblurConfig(Config):
     ######################################
 
     def __post_init__(self):
-        timestr = time.strftime("%Y%m%d-%H%M%S")
-        self.result_dir = Path(self.result_dir) / timestr
-        if isinstance(self.strategy, DefaultStrategy):
-            self.strategy.grow_grad2d = self.strategy.grow_grad2d / self.num_virtual_views
+        # Avoid multiple initialization
+        self.__post_init_complete = True
+        if hasattr(self, "__post_init_complete") and not self.__post_init_complete:
+            timestr = time.strftime("%Y%m%d-%H%M%S")
+            self.result_dir = Path(self.result_dir) / timestr
+            if isinstance(self.strategy, DefaultStrategy):
+                self.strategy.grow_grad2d = self.strategy.grow_grad2d / self.num_virtual_views
 
 
 class DeblurRunner(Runner):
