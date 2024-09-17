@@ -14,6 +14,7 @@ import tqdm
 import tyro
 import viser
 from dataclasses import dataclass, field
+from fused_ssim import fused_ssim
 from gsplat.distributed import cli
 from gsplat.strategy import DefaultStrategy, MCMCStrategy
 from nerfview.viewer import Viewer
@@ -47,13 +48,15 @@ class DeblurConfig(Config):
 
     # Downsample factor for the dataset
     data_factor: int = 1
-    # How much to scale the camera origins by. Default: 0.25 for LLFF scenes.
-    scale_factor: float = 0.25
+    # How much to scale the camera origins by. 0.25 is suggested for LLFF scenes.
+    scale_factor: float = 1.0
     # Directory to save results
     # result_dir: str = "results/garden"
-    result_dir: str = "results/tanabata"
+    result_dir: str = "results/tanabata_fused-ssim"
     # Every N images there is a test image
     test_every: int = 8
+
+    ########### Training ###############
 
     # Number of training steps
     max_steps: int = 30_000
@@ -61,6 +64,8 @@ class DeblurConfig(Config):
     eval_steps: List[int] = field(default_factory=lambda: [3_000, 7_000, 10_000, 15_000, 20_000, 30_000])
     # Steps to save the model
     save_steps: List[int] = field(default_factory=lambda: [3_000, 7_000, 10_000, 15_000, 20_000, 30_000])
+    # Use fused SSIM from Taming 3DGS (https://github.com/nerfstudio-project/gsplat/pull/396)
+    fused_ssim = False
 
     ########### Background ###############
 
@@ -390,9 +395,14 @@ class DeblurRunner(Runner):
 
             # loss
             l1loss = F.l1_loss(colors, pixels)
-            ssimloss = 1.0 - self.ssim(
-                pixels.permute(0, 3, 1, 2), colors.permute(0, 3, 1, 2)
-            )
+            if self.cfg.fused_ssim:
+                ssimloss = 1.0 - fused_ssim(
+                    colors.permute(0, 3, 1, 2), pixels.permute(0, 3, 1, 2), padding="valid"
+                )
+            else:
+                ssimloss = 1.0 - self.ssim(
+                    pixels.permute(0, 3, 1, 2), colors.permute(0, 3, 1, 2)
+                )
             loss = l1loss * (1.0 - cfg.ssim_lambda) + ssimloss * cfg.ssim_lambda
             if cfg.depth_loss:
                 # query depths from depth map
@@ -839,6 +849,12 @@ class DeblurRunner(Runner):
             writer.append_data(canvas)
         writer.close()
         print(f"Video saved to {video_dir}/traj_{step}.mp4")
+
+    def _init_viewer_state(self) -> None:
+        """Initializes viewer scene with given train dataset"""
+        if not self.cfg.disable_viewer and isinstance(self.viewer, PoseViewer):
+            assert self.viewer and self.trainset
+            self.viewer.init_scene(train_dataset=self.trainset, train_state="training")
 
 
 def main(local_rank: int, world_rank, world_size: int, cfg: DeblurConfig):

@@ -23,6 +23,7 @@ from datasets.colmap_dataparser import ColmapParser
 from datasets.deblur_nerf import DeblurNerfDataset
 from datasets.hdr_deblur_nerf import HdrDeblurNerfDataset
 from datasets.traj import generate_interpolated_path
+from fused_ssim import fused_ssim
 from gsplat.cuda._wrapper import spherical_harmonics
 from gsplat.strategy import DefaultStrategy, MCMCStrategy
 from nerfview.viewer import Viewer
@@ -57,13 +58,13 @@ class DeblurConfig(Config):
     # data_dir: str = "/datasets/bad-gaussian/data/bad-nerf-gtK-colmap-nvs/blurtanabata"
     # data_dir: str = "/datasets/HDR-Bad-Gaussian/bags/toufu3/toufu3/process"
     # data_dir: str = "/home/lzzhao/ws/DPVO/results/toufu3_dpvslam"
-    data_dir: str = "/datasets/HDR-Bad-Gaussian/scannet_restored/scene0077_00/dpvslam"
+    data_dir: str = "/datasets/HDR-Bad-Gaussian/scannet_restored/scene0072_01/dpvslam"
     # data_dir: str = "/home/cvgluser/blender/blender-3.6.13-linux-x64/data/deblurnerf/rawdata_new_tra1/cozyroom/process"
 
     # Downsample factor for the dataset
     data_factor: int = 2
-    # How much to scale the camera origins by. Default: 0.25 for LLFF scenes.
-    scale_factor: float = 0.25
+    # How much to scale the camera origins by. 0.25 is suggested for LLFF scenes.
+    scale_factor: float = 1.0
     # Directory to save results
     # result_dir: str = "results/garden_vanilla"
     # result_dir: str = "results/tanabata_vanilla"
@@ -71,7 +72,7 @@ class DeblurConfig(Config):
     # result_dir: str = "results/tanabata_den4e-4_grad25_absgrad"
     # result_dir: str = "results/hdr_ikun_mcmc_500k_grad25_explr_1e-4"
     # result_dir: str = "results/toufu3_dpvslam"
-    result_dir: str = "results/scannet_restored/scene0077_00_dpvslam_debug"
+    result_dir: str = "results/scannet_restored/scene0072_01_dpvslam_debug_fused-ssim"
     # Every N images there is a test image
     test_every: int = 9999
 
@@ -599,8 +600,8 @@ class DeblurRunner(Runner):
 
             # loss
             l1loss = F.l1_loss(colors, pixels)
-            ssimloss = 1.0 - self.ssim(
-                pixels.permute(0, 3, 1, 2), colors.permute(0, 3, 1, 2)
+            ssimloss = 1.0 - fused_ssim(
+                colors.permute(0, 3, 1, 2), pixels.permute(0, 3, 1, 2), padding="valid"
             )
             loss = l1loss * (1.0 - cfg.ssim_lambda) + ssimloss * cfg.ssim_lambda
             if cfg.depth_loss:
