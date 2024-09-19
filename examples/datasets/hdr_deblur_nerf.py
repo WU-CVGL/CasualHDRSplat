@@ -140,9 +140,10 @@ class HdrDeblurNerfDataset(Dataset):
         if len(timestamps) < 2:
             return None
         assert isinstance(timestamps, Tensor)
-        # duration = timestamps[1:] - timestamps[:-1]
-        # if not torch.allclose(duration, duration[0], rtol=5e-2):
-        #     raise ValueError("Timestamps are not in increasing order or with constant duration.")
+
+        # check if the time grid is strictly increasing
+        if not torch.diff(timestamps).all():
+            raise ValueError("Timestamps must be strictly increasing.")
 
     @staticmethod
     def _check_suffixes(filenames) -> List[Path]:
