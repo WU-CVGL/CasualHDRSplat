@@ -61,7 +61,8 @@ class DeblurConfig(Config):
     # data_dir: str = "/home/lzzhao/ws/DPVO/results/toufu3_dpvslam"
     # data_dir: str = "/home/cvgluser/blender/blender-3.6.13-linux-x64/data/deblurnerf/rawdata_new_tra1/cozyroom/process"
     # data_dir: str = "/datasets/HDR-Bad-Gaussian/scannet_restored/scene0072_01/dpvslam"
-    data_dir: str = "/datasets/HDR-Bad-Gaussian/pixel8pro/processed_2024_09_15_22_47_01-0/dpvslam"
+    # data_dir: str = "/datasets/HDR-Bad-Gaussian/bags/hdr_toufu_feat_ltdz20240920-012300/dpvslam"
+    data_dir: str = "/datasets/HDR-Bad-Gaussian/bags/failed_hdr_fish_feat_girls20240920-014751/dpvslam"
 
     # Downsample factor for the dataset
     data_factor: int = 2
@@ -74,7 +75,8 @@ class DeblurConfig(Config):
     # result_dir: str = "results/tanabata_den4e-4_grad25_absgrad"
     # result_dir: str = "results/hdr_ikun_mcmc_500k_grad25_explr_1e-4"
     # result_dir: str = "results/toufu3_dpvslam"
-    result_dir: str = "results/pixel8pro/2024_09_15_22_47_01_debug"
+    # result_dir: str = "results/pixel8pro/hdr_toufu_feat_ltdz20240920_dpvslam"
+    result_dir: str = "results/pixel8pro/hdr_fish_feat_girls20240920-014751_dpvslam"
     # Every N images there is a test image
     test_every: int = 9999
 
@@ -202,10 +204,12 @@ class DeblurConfig(Config):
     use_whitebalance: bool = False
     ######################################
 
+    # Avoid multiple initialization
+    hdr_deblur_post_init_complete: bool = False
+
     def __post_init__(self):
-        # Avoid multiple initialization
-        self.__post_init_complete = True
-        if hasattr(self, "__post_init_complete") and not self.__post_init_complete:
+        if not self.hdr_deblur_post_init_complete:
+            self.hdr_deblur_post_init_complete = True
             timestr = time.strftime("%Y%m%d-%H%M%S")
             self.result_dir = Path(self.result_dir) / timestr
             if isinstance(self.strategy, DefaultStrategy):
@@ -273,7 +277,6 @@ class DeblurRunner(Runner):
         print("Scene scale:", self.scene_scale)
 
         # Model
-        feature_dim = 32 if cfg.app_opt else None
         self.splats, self.optimizers = create_splats_with_optimizers(
             self.parser,
             init_type=cfg.init_type,
@@ -285,7 +288,7 @@ class DeblurRunner(Runner):
             sh_degree=cfg.sh_degree,
             sparse_grad=cfg.sparse_grad,
             batch_size=cfg.batch_size,
-            feature_dim=feature_dim,
+            feature_dim=None,
             device=self.device,
             world_rank=world_rank,
             world_size=world_size,
@@ -363,29 +366,6 @@ class DeblurRunner(Runner):
             if world_size > 1:
                 self.tonemapper = DDP(self.tonemapper)
 
-        # Appearance Optimization
-        self.app_optimizers = []
-        if cfg.app_opt:
-            self.app_module = AppearanceOptModule(
-                len(self.trainset), feature_dim, cfg.app_embed_dim, cfg.sh_degree
-            ).to(self.device)
-            # initialize the last layer to be zero so that the initial output is zero.
-            torch.nn.init.zeros_(self.app_module.color_head[-1].weight)
-            torch.nn.init.zeros_(self.app_module.color_head[-1].bias)
-            self.app_optimizers = [
-                torch.optim.Adam(
-                    self.app_module.embeds.parameters(),
-                    lr=cfg.app_opt_lr * math.sqrt(cfg.batch_size) * 10.0,
-                    weight_decay=cfg.app_opt_reg,
-                ),
-                torch.optim.Adam(
-                    self.app_module.color_head.parameters(),
-                    lr=cfg.app_opt_lr * math.sqrt(cfg.batch_size),
-                ),
-            ]
-            if world_size > 1:
-                self.app_module = DDP(self.app_module)
-
         # Losses & Metrics.
         self.ssim = StructuralSimilarityIndexMeasure(data_range=1.0).to(self.device)
         self.psnr = PeakSignalNoiseRatio(data_range=1.0).to(self.device)
@@ -415,8 +395,13 @@ class DeblurRunner(Runner):
             Ks: Tensor,
             width: int,
             height: int,
+            colmap_image_ids: Tensor,
+            exposure_time: Tensor,
             **kwargs,
     ) -> Tuple[Tensor, Tensor, Dict]:
+        """
+        Rasterize splats to image space. Overriding the base to customize the tone-mapping process.
+        """
         means = self.splats["means"]  # [N, 3]
         # quats = F.normalize(self.splats["quats"], dim=-1)  # [N, 4]
         # rasterization does normalization internally
@@ -424,25 +409,10 @@ class DeblurRunner(Runner):
         scales = torch.exp(self.splats["scales"])  # [N, 3]
         opacities = torch.sigmoid(self.splats["opacities"])  # [N,]
 
-        image_ids = kwargs.pop("image_ids", None)
-        if self.cfg.app_opt:
-            colors = self.app_module(
-                features=self.splats["features"],
-                embed_ids=image_ids,
-                dirs=means[None, :, :] - camtoworlds[:, None, :3, 3],
-                sh_degree=kwargs.pop("sh_degree", self.cfg.sh_degree),
-            )
-            colors = colors + self.splats["colors"]
-            colors = torch.sigmoid(colors)
-        else:
-            colors = torch.cat([self.splats["sh0"], self.splats["shN"]], 1)  # [N, K, 3]
+        colors = torch.cat([self.splats["sh0"], self.splats["shN"]], 1)  # [N, K, 3]
 
         if self.cfg.use_HDR:
-            try:
-                exposure_time = kwargs.pop('exposure_time').to(colors.device)
-            except:
-                exposure_time = torch.tensor(0, device=colors.device)
-            exposure_time = torch.clip(exposure_time, min=1e-10,max=0.5)
+            exposure_time = torch.clip(exposure_time, min=1e-10, max=0.5)
             C = camtoworlds.shape[0]
             dirs = means[None, :, :] - camtoworlds[:, None, :3, 3]
             sh_degree = kwargs.pop("sh_degree")
@@ -452,7 +422,7 @@ class DeblurRunner(Runner):
 
             colors_list = []
             for i in range(B):
-                c = self.tonemapper(colors[i], exposure_time, self.cfg.k_times, image_ids)
+                c = self.tonemapper(colors[i], exposure_time, self.cfg.k_times, colmap_image_ids)
                 colors_list.append(c)
             colors = torch.stack(colors_list)
 
@@ -563,8 +533,9 @@ class DeblurRunner(Runner):
 
             height, width = pixels.shape[1:3]
 
-            image_ids = data["image_id"]
-            poses, exposure_times = self.camera_trajectory(image_ids, "uniform")
+            image_ids = data["image_id"].to(device)
+            colmap_image_ids = data["colmap_image_id"].to(device)
+            poses, exposure_times = self.camera_trajectory(colmap_image_ids, "uniform")
             camtoworlds = poses.matrix()
             num_cur_virt_views = camtoworlds.shape[0]
             Ks = Ks.tile((num_cur_virt_views, 1, 1))
@@ -581,7 +552,7 @@ class DeblurRunner(Runner):
                 sh_degree=sh_degree_to_use,
                 near_plane=cfg.near_plane,
                 far_plane=cfg.far_plane,
-                image_ids=image_ids,
+                colmap_image_ids=colmap_image_ids,
                 render_mode="RGB+ED" if cfg.depth_loss else "RGB",
                 exposure_time=exposure_times,
             )
@@ -745,11 +716,6 @@ class DeblurRunner(Runner):
                     data["camera_trajectory"] = self.camera_trajectory.module.state_dict()
                 else:
                     data["camera_trajectory"] = self.camera_trajectory.state_dict()
-                if cfg.app_opt:
-                    if world_size > 1:
-                        data["app_module"] = self.app_module.module.state_dict()
-                    else:
-                        data["app_module"] = self.app_module.state_dict()
                 torch.save(
                     data, f"{self.ckpt_dir}/ckpt_{step}_rank{self.world_rank}.pt"
                 )
@@ -795,11 +761,6 @@ class DeblurRunner(Runner):
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
 
-            # optimize appearance
-            for optimizer in self.app_optimizers:
-                optimizer.step()
-                optimizer.zero_grad(set_to_none=True)
-
             # optimize exposure time
             if cfg.optimize_exposure_time:
                 if step % cfg.exposure_time_gradient_accumulation_steps == cfg.exposure_time_gradient_accumulation_steps - 1:
@@ -811,7 +772,6 @@ class DeblurRunner(Runner):
             if cfg.use_HDR:
                 self.tonemapper_optimizer.step()
                 self.tonemapper_optimizer.zero_grad(set_to_none=True)
-
 
             # optimize camera trajectory
             if step % cfg.pose_gradient_accumulation_steps == cfg.pose_gradient_accumulation_steps - 1:
@@ -870,8 +830,9 @@ class DeblurRunner(Runner):
             pixels = data["image"].to(device) / 255.0
             height, width = pixels.shape[1:3]
 
-            image_ids = data["image_id"]
-            pose, exposure_time = self.camera_trajectory(image_ids, "start")
+            image_ids = data["image_id"].to(device)
+            colmap_image_ids = data["colmap_image_id"].to(device)
+            pose, exposure_time = self.camera_trajectory(colmap_image_ids, "start")
             camtoworlds = pose.matrix()[None, ...]
 
             torch.cuda.synchronize()
@@ -884,7 +845,7 @@ class DeblurRunner(Runner):
                 sh_degree=cfg.sh_degree,
                 near_plane=cfg.near_plane,
                 far_plane=cfg.far_plane,
-                image_ids=image_ids,
+                colmap_image_ids=colmap_image_ids,
                 exposure_time=exposure_time,
             )  # [1, H, W, 3]
             colors = torch.clamp(colors, 0.0, 1.0)
@@ -964,6 +925,7 @@ class DeblurRunner(Runner):
             pixels = data["image"].to(device) / 255.0  # [1, H, W, 3]
             height, width = pixels.shape[1:3]
             image_ids = data["image_id"].to(device)
+            colmap_image_ids = data["colmap_image_id"].to(device)
             exposure_time = data['exposure_time'].to(device)
             print('NVS eval - Initial exposure time:', exposure_time.item())
             pixels_ = pixels.permute(0, 3, 1, 2)  # [1, 3, H, W]
@@ -1017,7 +979,7 @@ class DeblurRunner(Runner):
                     sh_degree=cfg.sh_degree,
                     near_plane=cfg.near_plane,
                     far_plane=cfg.far_plane,
-                    image_ids=image_ids,
+                    colmap_image_ids=colmap_image_ids,
                     render_mode="RGB",
                     exposure_time=exposure_time_new,
                 )
@@ -1195,7 +1157,9 @@ if __name__ == "__main__":
             DeblurConfig(
                 strategy=DefaultStrategy(
                     verbose=True,
-                    grow_grad2d=1e-2,
+                    grow_grad2d=4e-3,
+                    absgrad=True,
+                    refine_start_iter=1000,
                 ),
             ),
         ),
@@ -1204,7 +1168,10 @@ if __name__ == "__main__":
             DeblurConfig(
                 init_opa=0.5,
                 init_scale=0.1,
-                strategy=MCMCStrategy(verbose=True, cap_max=500_000),
+                strategy=MCMCStrategy(
+                    verbose=True,
+                    cap_max=500_000
+                ),
             ),
         ),
     }

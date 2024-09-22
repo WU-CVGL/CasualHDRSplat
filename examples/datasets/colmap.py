@@ -75,19 +75,9 @@ class Dataset:
             "K": torch.from_numpy(K).float(),
             "camtoworld": torch.from_numpy(camtoworlds).float(),
             "image": torch.from_numpy(image).float(),
-            "image_id": index,  # the index of the image in the dataset
+            "image_id": item,  # the index of the image in the dataset
+            "colmap_image_id": index,  # the index of the image in the colmap data
         }
-
-        if hasattr(self.parser, "camtoworlds_gt"):
-            camtoworlds_gt = self.parser.camtoworlds_gt[index]
-            data["camtoworld_gt"] = torch.from_numpy(camtoworlds_gt).float()
-
-        if hasattr(self.parser, 'mask_paths'):
-            pil_mask = Image.open(self.parser.mask_paths[index])
-            mask_tensor = torch.from_numpy(np.array(pil_mask)).unsqueeze(-1).bool()
-            if len(mask_tensor.shape) != 3:
-                raise ValueError("The mask image should have 1 channel")
-            data["mask"] = mask_tensor
 
         if self.load_depths:
             # projected points to image plane to get depths

@@ -595,6 +595,7 @@ class Runner:
                     indexing="ij",
                 )
                 grid_xy = torch.stack([grid_x, grid_y], dim=-1).unsqueeze(0)
+                # assert image_ids.cpu().item() in self.trainset.indices
                 colors = slice(self.bil_grids, grid_xy, colors, image_ids)["rgb"]
 
             if cfg.random_bkgd:

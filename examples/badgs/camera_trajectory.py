@@ -74,7 +74,7 @@ class CameraTrajectory(nn.Module):
         super().__init__()
         self.config = config
         self.device = device
-        self.timestamps = timestamps
+        self.timestamps = timestamps.to(device)
 
         # First initialize a temporary spline to interpolate on, and assume it non-uniform
         self.start_time = timestamps[0].item()
@@ -138,21 +138,21 @@ class CameraTrajectory(nn.Module):
 
     def forward(
             self,
-            image_idx: Float[Tensor, "*batch_size"],
+            colmap_image_id: Float[Tensor, "*batch_size"],
             mode: TrajSamplingMode,
     ) -> Tuple[Float[LieTensor, "*batch_size 7"], Optional[float]]:
         """Get camera pose and corresponding exposure_times from the camera trajectory.
 
         Args:
-            image_idx: the index of the image
+            colmap_image_id: the index of the image in the colmap data
             mode: the mode of trajectory sampling
 
         Returns:
             pose(s): the camera pose (camera to world)
             exposure_time: the exposure time
         """
-        timestamp = self.timestamps[image_idx]
-        exposure_time = self.get_exposure_time(image_idx)
+        timestamp = self.timestamps[colmap_image_id]
+        exposure_time = self.get_exposure_time(colmap_image_id)
 
         if mode == "start":
             pose = self.spline(timestamp)
@@ -177,17 +177,17 @@ class CameraTrajectory(nn.Module):
         else:
             assert_never(mode)
 
-    def get_exposure_time(self, image_idx: Int) -> float:
+    def get_exposure_time(self, colmap_image_id: Int) -> float:
         """Get exposure time from the camera trajectory.
 
         Args:
-            image_idx: the index of the image
+            colmap_image_id: the index of the image
 
         Returns:
             exposure_time: the exposure time
         """
-        exposure_time_opt = self.exposure_time_optimizer(image_idx)
-        exposure_time = self.exposure_times[image_idx] + exposure_time_opt
+        exposure_time_opt = self.exposure_time_optimizer(colmap_image_id)
+        exposure_time = self.exposure_times[colmap_image_id] + exposure_time_opt
         return torch.clamp(exposure_time,min=1e-5, max=self.frame_interval)
 
     def get_loss_dict(self, loss_dict: dict) -> None:

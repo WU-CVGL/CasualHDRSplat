@@ -133,11 +133,16 @@ class DeblurConfig(Config):
 
     ######################################
 
+    # Avoid multiple initialization
+    bad_gaussians_post_init_complete: bool = False
+
     def __post_init__(self):
-        timestr = time.strftime("%Y%m%d-%H%M%S")
-        self.result_dir = Path(self.result_dir) / timestr
-        if isinstance(self.strategy, DefaultStrategy):
-            self.strategy.grow_grad2d = self.strategy.grow_grad2d / self.camera_optimizer.num_virtual_views
+        if not self.bad_gaussians_post_init_complete:
+            self.bad_gaussians_post_init_complete = True
+            timestr = time.strftime("%Y%m%d-%H%M%S")
+            self.result_dir = Path(self.result_dir) / timestr
+            if isinstance(self.strategy, DefaultStrategy):
+                self.strategy.grow_grad2d = self.strategy.grow_grad2d / self.camera_optimizer.num_virtual_views
 
 
 class DeblurRunner(Runner):
@@ -909,7 +914,9 @@ if __name__ == "__main__":
             DeblurConfig(
                 strategy=DefaultStrategy(
                     verbose=True,
-                    grow_grad2d=1e-2,
+                    grow_grad2d=4e-3,
+                    absgrad=True,
+                    refine_start_iter=1000,
                 ),
             ),
         ),
@@ -918,7 +925,10 @@ if __name__ == "__main__":
             DeblurConfig(
                 init_opa=0.5,
                 init_scale=0.1,
-                strategy=MCMCStrategy(verbose=True, cap_max=500_000),
+                strategy=MCMCStrategy(
+                    verbose=True,
+                    cap_max=500_000
+                ),
             ),
         ),
     }
