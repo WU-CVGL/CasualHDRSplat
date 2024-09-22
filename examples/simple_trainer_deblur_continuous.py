@@ -34,7 +34,6 @@ from torch.utils.tensorboard import SummaryWriter
 from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 from utils import (
-    AppearanceOptModule,
     CameraOptModuleSE3,
     set_random_seed,
 )

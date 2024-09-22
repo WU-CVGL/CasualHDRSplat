@@ -3,6 +3,7 @@ import math
 import os
 import time
 import yaml
+from collections import defaultdict
 from pathlib import Path
 from typing import List
 from typing_extensions import assert_never
@@ -28,9 +29,14 @@ from badgs.bad_camera_optimizer import BadCameraOptimizer, BadCameraOptimizerCon
 from datasets.colmap import Dataset
 from datasets.colmap_dataparser import ColmapParser
 from datasets.deblur_nerf import DeblurNerfDataset
-from datasets.traj import generate_interpolated_path
 from pose_viewer import PoseViewer
 from simple_trainer import Config, Runner, create_splats_with_optimizers
+from lib_bilagrid import (
+    BilateralGrid,
+    slice,
+    color_correct,
+    total_variation_loss,
+)
 from utils import (
     AppearanceOptModule,
     CameraOptModuleSE3,
@@ -268,6 +274,22 @@ class DeblurRunner(Runner):
             if world_size > 1:
                 self.app_module = DDP(self.app_module)
 
+        self.bil_grid_optimizers = []
+        if cfg.use_bilateral_grid:
+            self.bil_grids = BilateralGrid(
+                len(self.trainset),
+                grid_X=cfg.bilateral_grid_shape[0],
+                grid_Y=cfg.bilateral_grid_shape[1],
+                grid_W=cfg.bilateral_grid_shape[2],
+            ).to(self.device)
+            self.bil_grid_optimizers = [
+                torch.optim.Adam(
+                    self.bil_grids.parameters(),
+                    lr=2e-3 * math.sqrt(cfg.batch_size),
+                    eps=1e-15,
+                ),
+            ]
+
         # Losses & Metrics.
         self.ssim = StructuralSimilarityIndexMeasure(data_range=1.0).to(self.device)
         self.psnr = PeakSignalNoiseRatio(data_range=1.0).to(self.device)
@@ -318,6 +340,23 @@ class DeblurRunner(Runner):
             gamma=cfg.pose_opt_lr_decay ** (1.0 / max_steps)
         )
         schedulers.append(pose_scheduler)
+
+        if cfg.use_bilateral_grid:
+            # bilateral grid has a learning rate schedule. Linear warmup for 1000 steps.
+            schedulers.append(
+                torch.optim.lr_scheduler.ChainedScheduler(
+                    [
+                        torch.optim.lr_scheduler.LinearLR(
+                            self.bil_grid_optimizers[0],
+                            start_factor=0.01,
+                            total_iters=1000,
+                        ),
+                        torch.optim.lr_scheduler.ExponentialLR(
+                            self.bil_grid_optimizers[0], gamma=0.01 ** (1.0 / max_steps)
+                        ),
+                    ]
+                )
+            )
 
         trainloader = torch.utils.data.DataLoader(
             self.trainset,
@@ -393,6 +432,15 @@ class DeblurRunner(Runner):
             # BAD-Gaussians: average the virtual views
             colors = colors.mean(0)[None]
 
+            if cfg.use_bilateral_grid:
+                grid_y, grid_x = torch.meshgrid(
+                    (torch.arange(height, device=self.device) + 0.5) / height,
+                    (torch.arange(width, device=self.device) + 0.5) / width,
+                    indexing="ij",
+                )
+                grid_xy = torch.stack([grid_x, grid_y], dim=-1).unsqueeze(0)
+                colors = slice(self.bil_grids, grid_xy, colors, image_ids)["rgb"]
+
             self.cfg.strategy.step_pre_backward(
                 params=self.splats,
                 optimizers=self.optimizers,
@@ -431,6 +479,10 @@ class DeblurRunner(Runner):
                 disp_gt = 1.0 / depths_gt  # [1, M]
                 depthloss = F.l1_loss(disp, disp_gt) * self.scene_scale
                 loss += depthloss * cfg.depth_lambda
+
+            if cfg.use_bilateral_grid:
+                tvloss = 10 * total_variation_loss(self.bil_grids.grids)
+                loss += tvloss
 
             if cfg.enable_mcmc_opacity_reg:
                 loss = (
@@ -497,7 +549,8 @@ class DeblurRunner(Runner):
 
                 if cfg.depth_loss:
                     self.writer.add_scalar("train/depthloss", depthloss.item(), step)
-
+                if cfg.use_bilateral_grid:
+                    self.writer.add_scalar("train/tvloss", tvloss.item(), step)
                 if cfg.tb_save_image:
                     canvas = torch.cat([pixels, colors], dim=2).detach().cpu().numpy()
                     canvas = canvas.reshape(-1, *canvas.shape[2:])
@@ -580,6 +633,9 @@ class DeblurRunner(Runner):
             for optimizer in self.app_optimizers:
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
+            for optimizer in self.bil_grid_optimizers:
+                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
             for scheduler in schedulers:
                 scheduler.step()
 
@@ -618,7 +674,7 @@ class DeblurRunner(Runner):
             dataset, batch_size=1, shuffle=False, num_workers=1
         )
         ellipse_time = 0
-        metrics = {"psnr": [], "ssim": [], "lpips": []}
+        metrics = defaultdict(list)
         for i, data in enumerate(testloader):
             camtoworlds = data["camtoworld"].to(device)
             Ks = data["K"].to(device)
@@ -651,32 +707,32 @@ class DeblurRunner(Runner):
                     f"{self.render_dir}/{step:04d}_{stage}_{i:04d}.png", (canvas * 255).astype(np.uint8)
                 )
 
-                pixels = pixels.permute(0, 3, 1, 2)  # [1, 3, H, W]
-                colors = colors.permute(0, 3, 1, 2)  # [1, 3, H, W]
-                metrics["psnr"].append(self.psnr(colors, pixels))
-                metrics["ssim"].append(self.ssim(colors, pixels))
-                metrics["lpips"].append(self.lpips(colors, pixels))
+                pixels_p = pixels.permute(0, 3, 1, 2)  # [1, 3, H, W]
+                colors_p = colors.permute(0, 3, 1, 2)  # [1, 3, H, W]
+                metrics["psnr"].append(self.psnr(colors_p, pixels_p))
+                metrics["ssim"].append(self.ssim(colors_p, pixels_p))
+                metrics["lpips"].append(self.lpips(colors_p, pixels_p))
+                if cfg.use_bilateral_grid:
+                    cc_colors = color_correct(colors, pixels)
+                    cc_colors_p = cc_colors.permute(0, 3, 1, 2)  # [1, 3, H, W]
+                    metrics["cc_psnr"].append(self.psnr(cc_colors_p, pixels_p))
 
         if world_rank == 0:
             ellipse_time /= len(testloader)
 
-            psnr = torch.stack(metrics["psnr"]).mean()
-            ssim = torch.stack(metrics["ssim"]).mean()
-            lpips = torch.stack(metrics["lpips"]).mean()
+            stats = {k: torch.stack(v).mean().item() for k, v in metrics.items()}
+            stats.update(
+                {
+                    "ellipse_time": ellipse_time,
+                    "num_GS": len(self.splats["means"]),
+                }
+            )
             print(
-                f"Stage {stage} at Step_{step:04d}:"
-                f"PSNR: {psnr.item():.3f}, SSIM: {ssim.item():.4f}, LPIPS: {lpips.item():.3f} "
-                f"Time: {ellipse_time:.3f}s/image "
-                f"Number of GS: {len(self.splats['means'])}"
+                f"PSNR: {stats['psnr']:.3f}, SSIM: {stats['ssim']:.4f}, LPIPS: {stats['lpips']:.3f} "
+                f"Time: {stats['ellipse_time']:.3f}s/image "
+                f"Number of GS: {stats['num_GS']}"
             )
             # save stats as json
-            stats = {
-                "psnr": psnr.item(),
-                "ssim": ssim.item(),
-                "lpips": lpips.item(),
-                "ellipse_time": ellipse_time,
-                "num_GS": len(self.splats["means"]),
-            }
             with open(f"{self.stats_dir}/{stage}_step{step:04d}.json", "w") as f:
                 json.dump(stats, f)
             # save stats to tensorboard
@@ -795,6 +851,7 @@ class DeblurRunner(Runner):
         }
         with open(f"{self.stats_dir}/{stage}_step{step:04d}.json", "w") as f:
             json.dump(stats, f)
+
         # save stats to tensorboard
         for k, v in stats.items():
             self.writer.add_scalar(f"{stage}/{k}", v, step)
@@ -804,59 +861,6 @@ class DeblurRunner(Runner):
         for optimizer in self.optimizers.values():
             for param_group in optimizer.param_groups:
                 param_group["params"][0].requires_grad = True
-
-    @torch.no_grad()
-    def render_traj(self, step: int):
-        """Entry for trajectory rendering."""
-        print("Running trajectory rendering...")
-        cfg = self.cfg
-        device = self.device
-
-        camtoworlds = self.parser.camtoworlds[5:-5]
-        camtoworlds = generate_interpolated_path(camtoworlds, 1)  # [N, 3, 4]
-        camtoworlds = np.concatenate(
-            [
-                camtoworlds,
-                np.repeat(np.array([[[0.0, 0.0, 0.0, 1.0]]]), len(camtoworlds), axis=0),
-            ],
-            axis=1,
-        )  # [N, 4, 4]
-
-        camtoworlds = torch.from_numpy(camtoworlds).float().to(device)
-        K = torch.from_numpy(list(self.parser.Ks_dict.values())[0]).float().to(device)
-        width, height = list(self.parser.imsize_dict.values())[0]
-
-        canvas_all = []
-        for i in tqdm.trange(len(camtoworlds), desc="Rendering trajectory"):
-            renders, _, _ = self.rasterize_splats(
-                camtoworlds=camtoworlds[i: i + 1],
-                Ks=K[None],
-                width=width,
-                height=height,
-                sh_degree=cfg.sh_degree,
-                near_plane=cfg.near_plane,
-                far_plane=cfg.far_plane,
-                render_mode="RGB+ED",
-            )  # [1, H, W, 4]
-            colors = torch.clamp(renders[0, ..., 0:3], 0.0, 1.0)  # [H, W, 3]
-            depths = renders[0, ..., 3:4]  # [H, W, 1]
-            depths = (depths - depths.min()) / (depths.max() - depths.min())
-
-            # write images
-            canvas = torch.cat(
-                [colors, depths.repeat(1, 1, 3)], dim=0 if width > height else 1
-            )
-            canvas = (canvas.cpu().numpy() * 255).astype(np.uint8)
-            canvas_all.append(canvas)
-
-        # save to video
-        video_dir = f"{cfg.result_dir}/videos"
-        os.makedirs(video_dir, exist_ok=True)
-        writer = imageio.get_writer(f"{video_dir}/traj_{step}.mp4", fps=30)
-        for canvas in canvas_all:
-            writer.append_data(canvas)
-        writer.close()
-        print(f"Video saved to {video_dir}/traj_{step}.mp4")
 
     def _init_viewer_state(self) -> None:
         """Initializes viewer scene with given train dataset"""
@@ -914,7 +918,7 @@ if __name__ == "__main__":
             DeblurConfig(
                 strategy=DefaultStrategy(
                     verbose=True,
-                    grow_grad2d=4e-3,
+                    grow_grad2d=3e-3,
                     absgrad=True,
                     refine_start_iter=1000,
                 ),
