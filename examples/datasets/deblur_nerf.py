@@ -41,7 +41,7 @@ class DeblurNerfDataset(Dataset):
             patch_size: Optional[int] = None,
             load_depths: bool = False,
     ):
-        if self.parser.nvs_on_contiguous_images:
+        if parser.nvs_on_contiguous_images:
             print(f"[INFO] Using contiguous images for NVS eval")
             parser.test_every = 0
         else:

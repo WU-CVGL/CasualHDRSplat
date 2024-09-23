@@ -729,6 +729,11 @@ class DeblurRunner(Runner):
                     cc_colors = color_correct(colors, pixels)
                     cc_colors_p = cc_colors.permute(0, 3, 1, 2)  # [1, 3, H, W]
                     metrics["cc_psnr"].append(self.psnr(cc_colors_p, pixels_p))
+                    # write images
+                    canvas = torch.cat([pixels, cc_colors], dim=2).squeeze(0).cpu().numpy()
+                    imageio.imwrite(
+                        f"{self.render_dir}/{step:04d}_{stage}_{i:04d}_corrected.png", (canvas * 255).astype(np.uint8)
+                    )
 
         if world_rank == 0:
             ellipse_time /= len(testloader)
