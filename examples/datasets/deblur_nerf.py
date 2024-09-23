@@ -41,14 +41,17 @@ class DeblurNerfDataset(Dataset):
             patch_size: Optional[int] = None,
             load_depths: bool = False,
     ):
-        # find the file named `hold=n` , n is the eval_interval to be recognized
-        hold_file = [f for f in os.listdir(parser.data_dir) if f.startswith('hold=')]
-        if len(hold_file) == 0:
-            print(f"[INFO] defaulting hold={parser.test_every}")
+        if self.parser.nvs_on_contiguous_images:
+            print(f"[INFO] Using contiguous images for NVS eval")
+            parser.test_every = 0
         else:
-            parser.test_every = int(hold_file[0].split('=')[-1])
-            print(f"[INFO] found hold={parser.test_every}")
-
+            # find the file named `hold=n` , n is the eval_interval to be recognized
+            hold_file = [f for f in os.listdir(parser.data_dir) if f.startswith('hold=')]
+            if len(hold_file) == 0:
+                print(f"[INFO] defaulting hold={parser.test_every}")
+            else:
+                parser.test_every = int(hold_file[0].split('=')[-1])
+                print(f"[INFO] found hold={parser.test_every}")
         if split == "train" and parser.test_every < 1:
             split = "all"
 
@@ -79,6 +82,13 @@ class DeblurNerfDataset(Dataset):
                 assert num_gt_images == 0 or num_gt_images == len(self.parser.image_names)
                 self.parser.image_paths = gt_image_paths
                 self.parser.image_names = [image_path.stem for image_path in gt_image_paths]
+                if self.parser.nvs_on_contiguous_images:
+                    if split == 'val':
+                        start_indices = self.indices[:self.parser.valstart]
+                        end_indices = self.indices[-self.parser.valend:]
+                        self.indices = np.concatenate((start_indices, end_indices))
+                    else:
+                        self.indices = self.indices[self.parser.valstart:-self.parser.valend]
             else:
                 if split == "test":
                     # No deblurring eval images found

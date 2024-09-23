@@ -134,10 +134,19 @@ class DeblurConfig(Config):
     # Pose gradient accumulation steps
     pose_gradient_accumulation_steps: int = 25
 
-    ########### Novel View Eval Camera Opt ###############
+    ########### Novel View Eval ###############
 
     # Enable novel view synthesis evaluation during training
     nvs_eval_enable_during_training: bool = True
+    # Whether we are running nvs eval on datasets of contiguous images. This will override test_every.
+    nvs_on_contiguous_images: bool = True
+    # nvs eval images at the beginning of the dataset
+    nvs_eval_start: int = 5
+    # nvs eval images at the end of the dataset
+    nvs_eval_end: int = 5
+
+    ########### Novel View Eval Camera Opt ###############
+
     # Steps per image to evaluate the novel view synthesis during training
     nvs_steps: int = 200
     # Steps per image to evaluate the novel view synthesis in final evaluation
@@ -186,14 +195,10 @@ class DeblurConfig(Config):
 
     # Read HDR Deblur-NeRF Dataset
     enable_hdr_deblur: bool = True
-    # valuation images at the beginning of the dataset
-    valstart: int = 5
-    # valuation images at the end of the dataset
-    valend: int = 5
 
     ########### HDR Tone Mapping ###############
 
-    use_HDR: bool = True
+    enable_tone_mapper: bool = True
     k_times: float = 1.0
     tonemapper_lr: float = 0.005
 
@@ -253,21 +258,21 @@ class DeblurRunner(Runner):
             scale_factor=cfg.scale_factor,
         )
         if cfg.enable_hdr_deblur:
-            self.parser.test_every = 0
-            self.parser.valstart = cfg.valstart
-            self.parser.valend = cfg.valend
-            self.trainset = HdrDeblurNerfDataset(self.parser, split="all")
-            self.valset = HdrDeblurNerfDataset(self.parser, split="val")#novel view
-            self.testset = HdrDeblurNerfDataset(self.parser, split="test")
+            self.T_dataset_type = HdrDeblurNerfDataset
+            assert cfg.nvs_on_contiguous_images
         else:
-            self.trainset = DeblurNerfDataset(
-                self.parser,
-                split="train",
-                patch_size=cfg.patch_size,
-                load_depths=cfg.depth_loss,
-            )
-            self.valset = DeblurNerfDataset(self.parser, split="val")
-            self.testset = DeblurNerfDataset(self.parser, split="test")
+            self.T_dataset_type = DeblurNerfDataset
+
+        if cfg.nvs_on_contiguous_images:
+            self.parser.nvs_on_contiguous_images = True
+            self.parser.valstart = cfg.nvs_eval_start
+            self.parser.valend = cfg.nvs_eval_end
+            self.trainset = self.T_dataset_type(self.parser, split="all")
+        else:
+            self.trainset = self.T_dataset_type(self.parser, split="train")
+
+        self.valset = self.T_dataset_type(self.parser, split="val")  # novel view
+        self.testset = self.T_dataset_type(self.parser, split="test")
         if len(self.valset.indices) == 0:
             self.valset = None
         if len(self.testset.indices) == 0:
@@ -350,7 +355,7 @@ class DeblurRunner(Runner):
             self.camera_trajectory = DDP(self.camera_trajectory)
 
         # HDR Tone Mapper
-        if cfg.use_HDR:
+        if cfg.enable_tone_mapper:
             self.tonemapper = ToneMapper(64).cuda()
             grad_vars = list(self.tonemapper.parameters())
             if cfg.use_whitebalance:
@@ -394,8 +399,8 @@ class DeblurRunner(Runner):
             Ks: Tensor,
             width: int,
             height: int,
-            colmap_image_ids: Tensor,
-            exposure_time: Tensor,
+            colmap_image_ids: Tensor = None,
+            exposure_time: Tensor = None,
             **kwargs,
     ) -> Tuple[Tensor, Tensor, Dict]:
         """
@@ -407,10 +412,15 @@ class DeblurRunner(Runner):
         quats = self.splats["quats"]  # [N, 4]
         scales = torch.exp(self.splats["scales"])  # [N, 3]
         opacities = torch.sigmoid(self.splats["opacities"])  # [N,]
-
         colors = torch.cat([self.splats["sh0"], self.splats["shN"]], 1)  # [N, K, 3]
 
-        if self.cfg.use_HDR:
+        if colmap_image_ids is None:
+            colmap_image_ids = torch.zeros(camtoworlds.shape[0], device=camtoworlds.device)
+        if exposure_time is None:
+            # TODO: add exposure_time control in the viewer
+            exposure_time = torch.ones(camtoworlds.shape[0], device=camtoworlds.device).float() / 30.0
+
+        if self.cfg.enable_tone_mapper:
             exposure_time = torch.clip(exposure_time, min=1e-10, max=0.5)
             C = camtoworlds.shape[0]
             dirs = means[None, :, :] - camtoworlds[:, None, :3, 3]
@@ -483,7 +493,7 @@ class DeblurRunner(Runner):
                 gamma=cfg.exposure_time_lr_decay ** (1.0 / max_steps),
             )
             schedulers.append(exposure_time_scheduler)
-        if cfg.use_HDR:
+        if cfg.enable_tone_mapper:
             tonemapper_scheduler = torch.optim.lr_scheduler.ExponentialLR(
                 self.tonemapper_optimizer,
                 gamma=cfg.tonemapper_lr_decay ** (1.0 / max_steps),
@@ -626,7 +636,7 @@ class DeblurRunner(Runner):
                 scale_reg = 0.1 * scale_reg.mean()
                 loss += scale_reg
 
-            if cfg.use_HDR:
+            if cfg.enable_tone_mapper:
                 loss += F.l1_loss(colors/2/colors.mean(), pixels/2/pixels.mean())
                 if exposure_times < 0:
                     loss += -exposure_times
@@ -768,7 +778,7 @@ class DeblurRunner(Runner):
                     self.exposure_time_optimizer.zero_grad(set_to_none=True)
 
             # optimize tone mapper
-            if cfg.use_HDR:
+            if cfg.enable_tone_mapper:
                 self.tonemapper_optimizer.step()
                 self.tonemapper_optimizer.zero_grad(set_to_none=True)
 
@@ -910,7 +920,7 @@ class DeblurRunner(Runner):
             for param_group in optimizer.param_groups:
                 param_group["params"][0].requires_grad = False
 
-        if cfg.use_HDR:
+        if cfg.enable_tone_mapper:
             for param_group in self.tonemapper_optimizer.param_groups:
                 param_group["params"][0].requires_grad = False
         if cfg.optimize_exposure_time:
@@ -1041,7 +1051,7 @@ class DeblurRunner(Runner):
         for optimizer in self.optimizers.values():
             for param_group in optimizer.param_groups:
                 param_group["params"][0].requires_grad = True
-        if cfg.use_HDR:
+        if cfg.enable_tone_mapper:
             for param_group in self.tonemapper_optimizer.param_groups:
                 param_group["params"][0].requires_grad = True
         if cfg.optimize_exposure_time:

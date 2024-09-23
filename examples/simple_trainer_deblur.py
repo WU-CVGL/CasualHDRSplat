@@ -102,10 +102,19 @@ class DeblurConfig(Config):
     # Pose gradient accumulation steps
     pose_gradient_accumulation_steps: int = 25
 
-    ########### Novel View Eval Camera Opt ###############
+    ########### Novel View Eval ###############
 
     # Enable novel view synthesis evaluation during training
     nvs_eval_enable_during_training: bool = True
+    # Whether we are running nvs eval on datasets of contiguous images. This will override test_every.
+    nvs_on_contiguous_images: bool = False
+    # nvs eval images at the beginning of the dataset
+    nvs_eval_start: int = 5
+    # nvs eval images at the end of the dataset
+    nvs_eval_end: int = 5
+
+    ########### Novel View Eval Camera Opt ###############
+
     # Steps per image to evaluate the novel view synthesis during training
     nvs_steps: int = 200
     # Steps per image to evaluate the novel view synthesis in final evaluation
@@ -186,14 +195,18 @@ class DeblurRunner(Runner):
             normalize=True,
             scale_factor=cfg.scale_factor,
         )
-        self.trainset = DeblurNerfDataset(
-            self.parser,
-            split="train",
-            patch_size=cfg.patch_size,
-            load_depths=cfg.depth_loss,
-        )
-        self.valset = DeblurNerfDataset(self.parser, split="val")
-        self.testset = DeblurNerfDataset(self.parser, split="test")
+
+        if cfg.nvs_on_contiguous_images:
+            self.parser.nvs_on_contiguous_images = True
+            self.parser.valstart = cfg.nvs_eval_start
+            self.parser.valend = cfg.nvs_eval_end
+            self.trainset = DeblurNerfDataset(self.parser, split="all")
+            self.valset = DeblurNerfDataset(self.parser, split="val")
+            self.testset = DeblurNerfDataset(self.parser, split="test")
+        else:
+            self.trainset = DeblurNerfDataset(self.parser, split="train")
+            self.valset = DeblurNerfDataset(self.parser, split="val")
+            self.testset = DeblurNerfDataset(self.parser, split="test")
         if len(self.valset.indices) == 0:
             self.valset = None
         if len(self.testset.indices) == 0:

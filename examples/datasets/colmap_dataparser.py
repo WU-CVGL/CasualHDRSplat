@@ -447,8 +447,12 @@ class ColmapParser:
                     imsize_dict[cam_id][1] * scale,
                 )
 
+        # HDR BAD-Gaussians dataparser storage
         self.timestamps = None
         self.exposure_time = None
+        self.nvs_on_contiguous_images = False
+        self.valstart = None
+        self.valend = None
 
     def _downscale_images(
             self,
