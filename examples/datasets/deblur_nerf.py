@@ -4,6 +4,7 @@ import numpy as np
 from copy import deepcopy
 from pathlib import Path
 from typing import List, Optional
+from typing_extensions import assert_never
 
 from .colmap import Dataset
 from .colmap_dataparser import ColmapParser
@@ -58,7 +59,7 @@ class DeblurNerfDataset(Dataset):
         super().__init__(parser, split, patch_size, load_depths)
 
         # "test" for deblur, "val" for novel-view
-        if split == "val" and parser.test_every < 1:
+        if split == "val" and parser.test_every < 1 and not parser.nvs_on_contiguous_images:
             self.indices = []
             return
 
@@ -82,13 +83,6 @@ class DeblurNerfDataset(Dataset):
                 assert num_gt_images == 0 or num_gt_images == len(self.parser.image_names)
                 self.parser.image_paths = gt_image_paths
                 self.parser.image_names = [image_path.stem for image_path in gt_image_paths]
-                if self.parser.nvs_on_contiguous_images:
-                    if split == 'val':
-                        start_indices = self.indices[:self.parser.valstart]
-                        end_indices = self.indices[-self.parser.valend:]
-                        self.indices = np.concatenate((start_indices, end_indices))
-                    else:
-                        self.indices = self.indices[self.parser.valstart:-self.parser.valend]
             else:
                 if split == "test":
                     # No deblurring eval images found
@@ -97,3 +91,12 @@ class DeblurNerfDataset(Dataset):
                 elif split == "val":
                     # Fallback to original Dataset split. Will find NVS eval image files in `images` folder.
                     self.parser = parser
+        if self.parser.nvs_on_contiguous_images and len(self.indices) > 0:
+            if split == 'val':
+                start_indices = self.indices[:self.parser.valstart]
+                end_indices = self.indices[-self.parser.valend:]
+                self.indices = np.concatenate((start_indices, end_indices))
+            elif split in ['train', 'test', 'all']:
+                self.indices = self.indices[self.parser.valstart:-self.parser.valend]
+            else:
+                assert_never(split)

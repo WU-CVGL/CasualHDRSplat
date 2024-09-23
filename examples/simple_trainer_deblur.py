@@ -200,7 +200,7 @@ class DeblurRunner(Runner):
             self.parser.nvs_on_contiguous_images = True
             self.parser.valstart = cfg.nvs_eval_start
             self.parser.valend = cfg.nvs_eval_end
-            self.trainset = DeblurNerfDataset(self.parser, split="all")
+            self.trainset = DeblurNerfDataset(self.parser, split="train")
             self.valset = DeblurNerfDataset(self.parser, split="val")
             self.testset = DeblurNerfDataset(self.parser, split="test")
         else:
@@ -729,6 +729,8 @@ class DeblurRunner(Runner):
                     cc_colors = color_correct(colors, pixels)
                     cc_colors_p = cc_colors.permute(0, 3, 1, 2)  # [1, 3, H, W]
                     metrics["cc_psnr"].append(self.psnr(cc_colors_p, pixels_p))
+                    metrics["cc_ssim"].append(self.ssim(cc_colors_p, pixels_p))
+                    metrics["cc_lpips"].append(self.lpips(cc_colors_p, pixels_p))
                     # write images
                     canvas = torch.cat([pixels, cc_colors], dim=2).squeeze(0).cpu().numpy()
                     imageio.imwrite(
@@ -750,6 +752,10 @@ class DeblurRunner(Runner):
                 f"Time: {stats['ellipse_time']:.3f}s/image "
                 f"Number of GS: {stats['num_GS']}"
             )
+            if cfg.use_bilateral_grid:
+                print(
+                    f"Corrected PSNR: {stats['cc_psnr']:.3f}, SSIM: {stats['cc_ssim']:.4f}, LPIPS: {stats['cc_lpips']:.3f} "
+                )
             # save stats as json
             with open(f"{self.stats_dir}/{stage}_step{step:04d}.json", "w") as f:
                 json.dump(stats, f)
@@ -773,7 +779,7 @@ class DeblurRunner(Runner):
             for param_group in optimizer.param_groups:
                 param_group["params"][0].requires_grad = False
 
-        metrics = {"psnr": [], "ssim": [], "lpips": []}
+        metrics = defaultdict(list)
         for i, data in enumerate(valloader):
             camtoworlds = data["camtoworld"].to(device)
             Ks = data["K"].to(device)
@@ -781,7 +787,7 @@ class DeblurRunner(Runner):
             height, width = pixels.shape[1:3]
             image_ids = data["image_id"].to(device)
 
-            pixels_ = pixels.permute(0, 3, 1, 2)  # [1, 3, H, W]
+            pixels_p = pixels.permute(0, 3, 1, 2)  # [1, 3, H, W]
 
             eval_pose_adjust = CameraOptModuleSE3(1).to(self.device)
             eval_pose_adjust.random_init(cfg.pose_noise)
@@ -813,12 +819,11 @@ class DeblurRunner(Runner):
                 )
                 # clamping here should be fine since we are only optimizing the camera
                 colors = torch.clamp(colors, 0.0, 1.0)
-                colors_ = colors.permute(0, 3, 1, 2)  # [1, 3, H, W]
+                colors_p = colors.permute(0, 3, 1, 2).detach()  # [1, 3, H, W]
 
                 # loss
                 l1loss = F.l1_loss(colors, pixels)
-                ssimloss = 1.0 - self.ssim(colors_, pixels_)
-                loss = l1loss * (1.0 - cfg.ssim_lambda) + ssimloss * cfg.ssim_lambda
+                loss = l1loss
 
                 loss.backward()
 
@@ -828,18 +833,21 @@ class DeblurRunner(Runner):
                 scheduler.step()
                 with torch.no_grad():
                     if j % 20 == 0:
-                        psnr = self.psnr(colors_.detach(), pixels_)
-                        ssim = self.ssim(colors_, pixels_)
-                        lpips = self.lpips(colors_.detach(), pixels_)
+                        psnr = self.psnr(colors_p, pixels_p)
+                        ssim = self.ssim(colors_p, pixels_p)
+                        lpips = self.lpips(colors_p, pixels_p)
                         print(
                             f"Stage {stage} at Step_{step:04d}:"
                             f"NVS_IMG_#{i:04d}_step_{j:04d}:"
                             f"PSNR: {psnr.item():.3f}, SSIM: {ssim.item():.4f}, LPIPS: {lpips.item():.3f} "
                         )
-                        metrics["psnr"].append(psnr)
-                        metrics["ssim"].append(ssim)
-                        metrics["lpips"].append(lpips)
-
+                        if cfg.use_bilateral_grid:
+                            cc_colors = color_correct(colors, pixels)
+                            cc_colors_p = cc_colors.permute(0, 3, 1, 2)
+                            cc_psnr = self.psnr(cc_colors_p, pixels_p)
+                            cc_ssim = self.ssim(cc_colors_p, pixels_p)
+                            cc_lpips = self.lpips(cc_colors_p, pixels_p)
+                            print(f"Corrected PSNR: {cc_psnr.item():.3f}, SSIM: {cc_ssim.item():.4f}, LPIPS: {cc_lpips.item():.3f} ")
                         # # NVS Debugging
                         # stats = {
                         #     "psnr": psnr.item(),
@@ -852,21 +860,26 @@ class DeblurRunner(Runner):
                         # self.writer.add_scalar(f"{stage}/{step}/{i}/camera_opt_translation", eval_pose_adjust.poses_opt[:, :3].mean(), j)
                         # self.writer.add_scalar(f"{stage}/{step}/{i}/camera_opt_rotation", eval_pose_adjust.poses_opt[:, 3:].mean(), j)
                         # self.writer.flush()
+            metrics["psnr"].append(psnr)
+            metrics["ssim"].append(ssim)
+            metrics["lpips"].append(lpips)
+            if cfg.use_bilateral_grid:
+                metrics["cc_psnr"].append(cc_psnr)
+                metrics["cc_ssim"].append(cc_ssim)
+                metrics["cc_lpips"].append(cc_lpips)
 
             # write images
             canvas = torch.cat([pixels, colors], dim=2).squeeze(0).detach().cpu().numpy()
             imageio.imwrite(
                 f"{self.render_dir}/{step:04d}_{stage}_{i:04d}_{j:04d}.png", (canvas * 255).astype(np.uint8)
             )
-        psnr = torch.stack(metrics["psnr"]).mean()
-        ssim = torch.stack(metrics["ssim"]).mean()
-        lpips = torch.stack(metrics["lpips"]).mean()
+            if cfg.use_bilateral_grid:
+                canvas = torch.cat([pixels, cc_colors], dim=2).squeeze(0).detach().cpu().numpy()
+                imageio.imwrite(
+                    f"{self.render_dir}/{step:04d}_{stage}_{i:04d}_{j:04d}_corrected.png", (canvas * 255).astype(np.uint8)
+                )
+        stats = {k: torch.stack(v).mean().item() for k, v in metrics.items()}
         # save stats as json
-        stats = {
-            "psnr": psnr.item(),
-            "ssim": ssim.item(),
-            "lpips": lpips.item(),
-        }
         with open(f"{self.stats_dir}/{stage}_step{step:04d}.json", "w") as f:
             json.dump(stats, f)
 
@@ -897,19 +910,23 @@ def main(local_rank: int, world_rank, world_size: int, cfg: DeblurConfig):
 
     if cfg.ckpt is not None:
         # run eval only
-        ckpt = torch.load(cfg.ckpt, map_location=runner.device)
+        ckpts = [
+            torch.load(file, map_location=runner.device, weights_only=False)
+            for file in cfg.ckpt
+        ]
         for k in runner.splats.keys():
-            runner.splats[k].data = ckpt["splats"][k].detach().to(runner.device)
-        runner.camera_optimizer.load_state_dict(ckpt["camera_opt"])
+            runner.splats[k].data = torch.cat([ckpt["splats"][k].detach().to(runner.device) for ckpt in ckpts])
+        runner.camera_optimizer.load_state_dict(ckpts[0]["camera_opt"])
+        step = ckpts[0]["step"]
         if runner.testset is not None:
             if cfg.deblur_eval_enable_pose_opt:
-                runner.eval_with_pose_opt(step=ckpt["step"], stage="deblur", dataset=runner.testset)
+                runner.eval_with_pose_opt(step=step, stage="deblur", dataset=runner.testset)
             else:
-                runner.eval_deblur(step=ckpt["step"], stage="deblur", dataset=runner.testset)
+                runner.eval_deblur(step=step, stage="deblur", dataset=runner.testset)
         if runner.valset is not None:
-            runner.eval_with_pose_opt(step=ckpt["step"], stage="nvs", dataset=runner.valset)
+            runner.eval_with_pose_opt(step=step, stage="nvs", dataset=runner.valset)
 
-        runner.render_traj(step=ckpt["step"])
+        runner.render_traj(step=step)
     else:
         runner.train()
 

@@ -39,7 +39,8 @@ class Dataset:
         elif split == "all":
             self.indices = indices
         else:
-            self.indices = indices[indices % self.parser.test_every == 0]
+            if self.parser.test_every > 1:
+                self.indices = indices[indices % self.parser.test_every == 0]
 
     def __len__(self):
         return len(self.indices)

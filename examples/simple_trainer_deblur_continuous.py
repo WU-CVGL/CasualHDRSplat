@@ -1129,17 +1129,22 @@ def main(local_rank: int, world_rank, world_size: int, cfg: DeblurConfig):
 
     if cfg.ckpt is not None:
         # run eval only
-        ckpt = torch.load(cfg.ckpt, map_location=runner.device)
+        ckpts = [
+            torch.load(file, map_location=runner.device, weights_only=True)
+            for file in cfg.ckpt
+        ]
         for k in runner.splats.keys():
-            runner.splats[k].data = ckpt["splats"][k].detach().to(runner.device)
-            runner.camera_trajectory.exposure_time_optimizer.adjustment = ckpt[
-                "camera_trajectory"]["exposure_time_optimizer.adjustment"].detach().to(runner.device)
-            runner.camera_trajectory.spline.spline_optimizer.pose_adjustment = ckpt[
-                "camera_trajectory"]["'spline.spline_optimizer.pose_adjustment'"].detach().to(runner.device)
-        runner.eval_deblur(step=ckpt["step"])
+            runner.splats[k].data = torch.cat([ckpt["splats"][k].detach().to(runner.device) for ckpt in ckpts])
+        ckpt_traj = ckpts[0]["camera_trajectory"]
+        runner.camera_trajectory.exposure_time_optimizer.adjustment = ckpt_traj[
+            "exposure_time_optimizer.adjustment"].detach().to(runner.device)
+        runner.camera_trajectory.spline.spline_optimizer.pose_adjustment = ckpt_traj[
+            "'spline.spline_optimizer.pose_adjustment'"].detach().to(runner.device)
+        step = ckpts[0]["step"]
+        runner.eval_deblur(step=step)
         if runner.valset is not None:
-            runner.eval_novel_view(step=ckpt["step"])
-        runner.render_traj(step=ckpt["step"])
+            runner.eval_novel_view(step=step)
+        runner.render_traj(step=step)
     else:
         runner.train()
 

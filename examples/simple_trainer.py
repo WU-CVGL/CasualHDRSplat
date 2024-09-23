@@ -845,6 +845,8 @@ class Runner:
                     cc_colors = color_correct(colors, pixels)
                     cc_colors_p = cc_colors.permute(0, 3, 1, 2)  # [1, 3, H, W]
                     metrics["cc_psnr"].append(self.psnr(cc_colors_p, pixels_p))
+                    metrics["cc_ssim"].append(self.ssim(cc_colors_p, pixels_p))
+                    metrics["cc_lpips"].append(self.lpips(cc_colors_p, pixels_p))
                     # write images
                     canvas = torch.cat([pixels, cc_colors], dim=2).squeeze(0).cpu().numpy()
                     imageio.imwrite(
