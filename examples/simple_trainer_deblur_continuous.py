@@ -46,10 +46,6 @@ from badgs.tonemapper import ToneMapper
 
 @dataclass
 class DeblurConfig(Config):
-    # Path to the .pt file. If provide, it will skip training and render a video
-    # ckpt: Optional[str] = "results/tanabata_mcmc_500k_grad25/ckpts/ckpt_29999.pt"
-    ckpt: Optional[str] = None
-
     # Path to the Mip-NeRF 360 dataset
     # data_dir: str = "data/360_v2/garden"
     # data_dir: str = "/datasets/bad-gaussian/data/bad-nerf-gtK-colmap-nvs/blurtanabata"
@@ -58,7 +54,7 @@ class DeblurConfig(Config):
     # data_dir: str = "/home/cvgluser/blender/blender-3.6.13-linux-x64/data/deblurnerf/rawdata_new_tra1/cozyroom/process"
     # data_dir: str = "/datasets/HDR-Bad-Gaussian/scannet_restored/scene0072_01/dpvslam"
     # data_dir: str = "/datasets/HDR-Bad-Gaussian/bags/hdr_toufu_feat_ltdz20240920-012300/dpvslam"
-    data_dir: str = "/datasets/HDR-Bad-Gaussian/pixel8pro/processed_2024_09_24_13_55_25-0/dpvslam"
+    data_dir: str = "/datasets/HDR-Bad-Gaussian/pixel8pro/processed_2024_09_24_13_57_43-0/dpvslam"
 
     # Downsample factor for the dataset
     data_factor: int = 2
@@ -72,7 +68,7 @@ class DeblurConfig(Config):
     # result_dir: str = "results/hdr_ikun_mcmc_500k_grad25_explr_1e-4"
     # result_dir: str = "results/toufu3_dpvslam"
     # result_dir: str = "results/pixel8pro/hdr_toufu_feat_ltdz20240920_dpvslam"
-    result_dir: str = "results/pixel8pro/processed_2024_09_24_13_55_25-0_dpvslam"
+    result_dir: str = "results/pixel8pro/processed_2024_09_24_13_57_43-0_dpvslam"
     # Every N images there is a test image
     test_every: int = 9999
 
@@ -1144,20 +1140,16 @@ def main(local_rank: int, world_rank, world_size: int, cfg: DeblurConfig):
     if cfg.ckpt is not None:
         # run eval only
         ckpts = [
-            torch.load(file, map_location=runner.device, weights_only=True)
+            torch.load(file, map_location=runner.device, weights_only=False)
             for file in cfg.ckpt
         ]
         for k in runner.splats.keys():
             runner.splats[k].data = torch.cat([ckpt["splats"][k].detach().to(runner.device) for ckpt in ckpts])
-        ckpt_traj = ckpts[0]["camera_trajectory"]
-        runner.camera_trajectory.exposure_time_optimizer.adjustment = ckpt_traj[
-            "exposure_time_optimizer.adjustment"].detach().to(runner.device)
-        runner.camera_trajectory.spline.spline_optimizer.pose_adjustment = ckpt_traj[
-            "'spline.spline_optimizer.pose_adjustment'"].detach().to(runner.device)
+        runner.camera_trajectory.load_state_dict(ckpts[0]["camera_trajectory"])
         step = ckpts[0]["step"]
-        runner.eval_deblur(step=step)
+        runner.eval_deblur(step, "deblur", runner.testset)
         if runner.valset is not None:
-            runner.eval_novel_view(step=step)
+            runner.eval_with_pose_opt(step, "nvs", runner.valset)
         runner.render_traj(step=step)
     else:
         runner.train()
