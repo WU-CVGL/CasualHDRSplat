@@ -61,7 +61,7 @@ class DeblurConfig(Config):
     # data_dir: str = "/home/cvgluser/blender/blender-3.6.13-linux-x64/data/deblurnerf/rawdata_new_tra1/cozyroom/process"
     # data_dir: str = "/datasets/HDR-Bad-Gaussian/scannet_restored/scene0072_01/dpvslam"
     # data_dir: str = "/datasets/HDR-Bad-Gaussian/bags/hdr_toufu_feat_ltdz20240920-012300/dpvslam"
-    data_dir: str = "/datasets/HDR-Bad-Gaussian/bags/failed_hdr_fish_feat_girls20240920-014751/dpvslam"
+    data_dir: str = "/datasets/HDR-Bad-Gaussian/pixel8pro/processed_2024_09_24_13_55_25-0/dpvslam"
 
     # Downsample factor for the dataset
     data_factor: int = 2
@@ -75,7 +75,7 @@ class DeblurConfig(Config):
     # result_dir: str = "results/hdr_ikun_mcmc_500k_grad25_explr_1e-4"
     # result_dir: str = "results/toufu3_dpvslam"
     # result_dir: str = "results/pixel8pro/hdr_toufu_feat_ltdz20240920_dpvslam"
-    result_dir: str = "results/pixel8pro/hdr_fish_feat_girls20240920-014751_dpvslam"
+    result_dir: str = "results/pixel8pro/processed_2024_09_24_13_55_25-0_dpvslam"
     # Every N images there is a test image
     test_every: int = 9999
 
@@ -233,8 +233,10 @@ class DeblurRunner(Runner):
         self.local_rank = local_rank
         self.world_size = world_size
         self.device = f"cuda:{local_rank}"
-
-        self.cfg.k_times = float([f for f in os.listdir(self.cfg.data_dir) if f.startswith('k_times=')][0].split('=')[1])
+        try:
+            self.cfg.k_times = float([f for f in os.listdir(self.cfg.data_dir) if f.startswith('k_times=')][0].split('=')[1])
+        except IndexError:
+            self.cfg.k_times = 1.0
 
         # Where to dump results.
         os.makedirs(cfg.result_dir, exist_ok=True)

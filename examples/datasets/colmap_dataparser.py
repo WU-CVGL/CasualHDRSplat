@@ -551,25 +551,23 @@ class ColmapParser:
                 CONSOLE.print(
                     f"[bold red]Downscaled images do not exist for factor of {self._downscale_factor}.[/bold red]"
                 )
-                if Confirm.ask(
-                        f"\nWould you like to downscale the images using '{self.downscale_rounding_mode}' rounding mode now?",
-                        default=False,
-                        console=CONSOLE,
-                ):
-                    # Install the method
-                    self._downscale_images(
-                        image_filenames,
-                        partial(get_fname, images_parent_dir),
-                        self._downscale_factor,
-                        self.downscale_rounding_mode,
-                        nearest_neighbor=False,
-                    )
-                    if len(mask_filenames) > 0:
-                        raise NotImplementedError
-                    if len(depth_filenames) > 0:
-                        raise NotImplementedError
-                else:
-                    sys.exit(1)
+                CONSOLE.print(
+                    f"\nDownscaling the images using '{self.downscale_rounding_mode}' rounding mode now"
+                )
+                # Install the method
+                self._downscale_images(
+                    image_filenames,
+                    partial(get_fname, images_parent_dir),
+                    self._downscale_factor,
+                    self.downscale_rounding_mode,
+                    nearest_neighbor=False,
+                )
+                if len(mask_filenames) > 0:
+                    raise NotImplementedError
+                if len(depth_filenames) > 0:
+                    raise NotImplementedError
+            else:
+                sys.exit(1)
 
         # Return transformed filenames
         if self._downscale_factor > 1:
@@ -582,4 +580,5 @@ class ColmapParser:
             if len(depth_filenames) > 0:
                 raise NotImplementedError
         assert isinstance(self._downscale_factor, int)
+        self._downscale_factor = None
         return image_filenames, mask_filenames, depth_filenames, self._downscale_factor
