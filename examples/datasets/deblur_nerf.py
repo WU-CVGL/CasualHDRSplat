@@ -7,7 +7,7 @@ from typing import List, Optional
 from typing_extensions import assert_never
 
 from .colmap import Dataset
-from .colmap_dataparser import ColmapParser
+from .colmap_dataparser import ColmapParser, CONSOLE
 
 
 def _find_files(directory: Path, exts: List[str]) -> List[Path]:
@@ -84,6 +84,7 @@ class DeblurNerfDataset(Dataset):
                 self.parser.image_paths = gt_image_paths
                 self.parser.image_names = [image_path.stem for image_path in gt_image_paths]
             else:
+                CONSOLE.log(f"[bold red][WARN] No images found in {gt_dir}.[/bold red]")
                 if split == "test":
                     # No deblurring eval images found
                     self.indices = []

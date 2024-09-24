@@ -548,11 +548,11 @@ class ColmapParser:
             ):
                 # Downscaled images not found
                 # Ask if user wants to downscale the images automatically here
-                CONSOLE.print(
+                CONSOLE.log(
                     f"[bold red]Downscaled images do not exist for factor of {self._downscale_factor}.[/bold red]"
                 )
-                CONSOLE.print(
-                    f"\nDownscaling the images using '{self.downscale_rounding_mode}' rounding mode now"
+                CONSOLE.log(
+                    f"[green]Downscaling the images using '{self.downscale_rounding_mode}' rounding mode now.[/green]"
                 )
                 # Install the method
                 self._downscale_images(
