@@ -14,6 +14,8 @@ import tqdm
 import tyro
 import viser
 import yaml
+from evo.core.trajectory import PoseTrajectory3D
+from evo.tools.file_interface import write_tum_trajectory_file
 from dataclasses import dataclass, field
 from gsplat.distributed import cli
 from gsplat.rendering import rasterization
@@ -117,12 +119,14 @@ class DeblurConfig(Config):
 
     ########### Motion Deblur ###############
 
-    # BAD-Gaussians: Number of virtual cameras
+    # Number of virtual cameras
     num_virtual_views: int = 10
-    # BAD-Gaussians: Trajectory representation type
+    # Trajectory representation type
     traj_type: Literal["linear", "cubic"] = "cubic"
-    # BAD-Gaussians: Trajectory interpolation ratio
+    # Trajectory interpolation ratio
     traj_interpolate_ratio: float = 2.0
+    # Type of image timestamp, defined as start / mid / end of the exposure
+    image_timestamp_type: Literal["start", "mid", "end"] = "start"
 
     ########### Camera Opt ###############
 
@@ -851,7 +855,7 @@ class DeblurRunner(Runner):
 
             image_ids = data["image_id"].to(device)
             colmap_image_ids = data["colmap_image_id"].to(device)
-            pose, exposure_time = self.camera_trajectory(colmap_image_ids, "start")
+            pose, exposure_time = self.camera_trajectory(colmap_image_ids, cfg.image_timestamp_type)
             camtoworlds = pose.matrix()[None, ...]
 
             torch.cuda.synchronize()
@@ -1069,58 +1073,29 @@ class DeblurRunner(Runner):
                 param_group["params"][0].requires_grad = True
 
     @torch.no_grad()
-    def render_traj(self, step: int):
-        """Entry for trajectory rendering."""
-        print("Running trajectory rendering...")
-        cfg = self.cfg
-        device = self.device
-
-        camtoworlds = self.parser.camtoworlds[5:-5]
-        camtoworlds = generate_interpolated_path(camtoworlds, 1)  # [N, 3, 4]
-        camtoworlds = np.concatenate(
-            [
-                camtoworlds,
-                np.repeat(np.array([[[0.0, 0.0, 0.0, 1.0]]]), len(camtoworlds), axis=0),
-            ],
-            axis=1,
-        )  # [N, 4, 4]
-
-        camtoworlds = torch.from_numpy(camtoworlds).float().to(device)
-        K = torch.from_numpy(list(self.parser.Ks_dict.values())[0]).float().to(device)
-        width, height = list(self.parser.imsize_dict.values())[0]
-
-        canvas_all = []
-        for i in tqdm.trange(len(camtoworlds), desc="Rendering trajectory"):
-            renders, _, _ = self.rasterize_splats(
-                camtoworlds=camtoworlds[i: i + 1],
-                Ks=K[None],
-                width=width,
-                height=height,
-                sh_degree=cfg.sh_degree,
-                near_plane=cfg.near_plane,
-                far_plane=cfg.far_plane,
-                render_mode="RGB+ED",
-                exposure_time=self.camera_trajectory.exposure_times[0]
-            )  # [1, H, W, 4]
-            colors = torch.clamp(renders[0, ..., 0:3], 0.0, 1.0)  # [H, W, 3]
-            depths = renders[0, ..., 3:4]  # [H, W, 1]
-            depths = (depths - depths.min()) / (depths.max() - depths.min())
-
-            # write images
-            canvas = torch.cat(
-                [colors, depths.repeat(1, 1, 3)], dim=0 if width > height else 1
-            )
-            canvas = (canvas.cpu().numpy() * 255).astype(np.uint8)
-            canvas_all.append(canvas)
-
-        # save to video
-        video_dir = f"{cfg.result_dir}/videos"
-        os.makedirs(video_dir, exist_ok=True)
-        writer = imageio.get_writer(f"{video_dir}/traj_{step}.mp4", fps=30, codec='libx264')
-        for canvas in canvas_all:
-            writer.append_data(canvas)
-        writer.close()
-        print(f"Video saved to {video_dir}/traj_{step}.mp4")
+    def eval_traj(self, step: int):
+        # TODO: add gt trajectory and calculate ATE
+        pass
+        # Get estimated trajectory
+        # first get the colmap_image_ids
+        colmap_image_ids = [data["colmap_image_id"] for data in self.trainset]
+        colmap_image_ids = torch.tensor(np.stack(colmap_image_ids).astype(np.int32)).to(self.device)
+        # then get the poses
+        poses, _ = self.camera_trajectory(colmap_image_ids, cfg.image_timestamp_type)
+        timestamps = self.parser.timestamps[colmap_image_ids.cpu()]
+        positions_xyz = poses.translation().cpu().numpy()
+        orientations_quat_xyzw = poses.rotation().cpu().numpy()
+        orientations_quat_wxyz = orientations_quat_xyzw[:, [3, 0, 1, 2]]
+        assert len(timestamps) == len(poses)
+        # Save the trajectory
+        traj = PoseTrajectory3D(
+            timestamps=timestamps,
+            positions_xyz=positions_xyz,
+            orientations_quat_wxyz=orientations_quat_wxyz,
+        )
+        traj_save_path = f"{self.stats_dir}/traj_{step:04d}.txt"
+        write_tum_trajectory_file(traj_save_path, traj)
+        print(f"Saved estimated trajectory to {traj_save_path}")
 
     def _init_viewer_state(self) -> None:
         """Initializes viewer scene with given train dataset"""
@@ -1147,9 +1122,10 @@ def main(local_rank: int, world_rank, world_size: int, cfg: DeblurConfig):
             runner.splats[k].data = torch.cat([ckpt["splats"][k].detach().to(runner.device) for ckpt in ckpts])
         runner.camera_trajectory.load_state_dict(ckpts[0]["camera_trajectory"])
         step = ckpts[0]["step"]
-        runner.eval_deblur(step, "deblur", runner.testset)
-        if runner.valset is not None:
-            runner.eval_with_pose_opt(step, "nvs", runner.valset)
+        # runner.eval_deblur(step, "deblur", runner.testset)
+        # if runner.valset is not None:
+        #     runner.eval_with_pose_opt(step, "nvs", runner.valset)
+        runner.eval_traj(step)
         runner.render_traj(step=step)
     else:
         runner.train()

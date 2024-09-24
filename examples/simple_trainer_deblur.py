@@ -899,6 +899,15 @@ class DeblurRunner(Runner):
             for param_group in optimizer.param_groups:
                 param_group["params"][0].requires_grad = True
 
+    @torch.no_grad()
+    def eval_traj(self, step: int):
+        # TODO: add gt trajectory
+
+        # Get estimated trajectory
+        camtoworlds = self.camera_optimizer.get_cameras()
+
+        raise NotImplementedError
+
     def _init_viewer_state(self) -> None:
         """Initializes viewer scene with given train dataset"""
         if not self.cfg.disable_viewer and isinstance(self.viewer, PoseViewer):
