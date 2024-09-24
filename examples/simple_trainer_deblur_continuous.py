@@ -46,9 +46,6 @@ from badgs.tonemapper import ToneMapper
 
 @dataclass
 class DeblurConfig(Config):
-    # Visualize cameras in the viewer
-    visualize_cameras: bool = True
-
     # Path to the .pt file. If provide, it will skip training and render a video
     # ckpt: Optional[str] = "results/tanabata_mcmc_500k_grad25/ckpts/ckpt_29999.pt"
     ckpt: Optional[str] = None
@@ -79,8 +76,12 @@ class DeblurConfig(Config):
     # Every N images there is a test image
     test_every: int = 9999
 
-    # Port for the viewer server
-    port: int = 8080
+    ########### Viewer ###############
+
+    # Visualize cameras in the viewer
+    visualize_cameras: bool = True
+
+    ########### Training ###############
 
     # Batch size for training. Learning rates are scaled automatically
     batch_size: int = 1
@@ -93,6 +94,12 @@ class DeblurConfig(Config):
     eval_steps: List[int] = field(default_factory=lambda: [500, 3_000, 5_000, 10_000, 15_000, 20_000, 30_000])
     # Steps to save the model
     save_steps: List[int] = field(default_factory=lambda: [5_000, 10_000, 15_000, 20_000, 30_000])
+
+    # Use fused SSIM from Taming 3DGS (https://github.com/nerfstudio-project/gsplat/pull/396)
+    fused_ssim = False
+
+    # Whether to pin memory for DataLoader. Disable if you run out of memory.
+    pin_memory: bool = False
 
     ########### Background ###############
 
@@ -509,7 +516,7 @@ class DeblurRunner(Runner):
             shuffle=True,
             num_workers=4,
             persistent_workers=True,
-            pin_memory=True,
+            pin_memory=cfg.pin_memory,
         )
         trainloader_iter = iter(trainloader)
 
@@ -589,9 +596,14 @@ class DeblurRunner(Runner):
 
             # loss
             l1loss = F.l1_loss(colors, pixels)
-            ssimloss = 1.0 - fused_ssim(
-                colors.permute(0, 3, 1, 2), pixels.permute(0, 3, 1, 2), padding="valid"
-            )
+            if self.cfg.fused_ssim:
+                ssimloss = 1.0 - fused_ssim(
+                    colors.permute(0, 3, 1, 2), pixels.permute(0, 3, 1, 2), padding="valid"
+                )
+            else:
+                ssimloss = 1.0 - self.ssim(
+                    pixels.permute(0, 3, 1, 2), colors.permute(0, 3, 1, 2)
+                )
             loss = l1loss * (1.0 - cfg.ssim_lambda) + ssimloss * cfg.ssim_lambda
             if cfg.depth_loss:
                 # query depths from depth map
