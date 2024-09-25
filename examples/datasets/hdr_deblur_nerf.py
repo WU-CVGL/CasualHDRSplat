@@ -41,8 +41,8 @@ class HdrDeblurNerfDataset(DeblurNerfDataset):
                 timestamps = np.arange(len(parser.image_paths)) / frame_rate
 
         timestamps = np.array([float(t) for t in timestamps])
-        self.timestamps_begin = np.floor(timestamps[0])
-        timestamps = timestamps - self.timestamps_begin
+        self.parser.timestamps_begin = np.floor(timestamps[0])
+        timestamps = timestamps - self.parser.timestamps_begin
 
         try:
             exposure_times_dict = self._read_exposure_times()
@@ -54,7 +54,7 @@ class HdrDeblurNerfDataset(DeblurNerfDataset):
             exposure_times_dict_new = {}
             if exposure_times_dict is not None:
                 for k, v in exposure_times_dict.items():
-                    new_key = float(k) - self.timestamps_begin
+                    new_key = float(k) - self.parser.timestamps_begin
                     exposure_times_dict_new[new_key] = v
             exposure_times_dict = exposure_times_dict_new
             exposure_times = torch.tensor([float(exposure_times_dict[timestamp]) for timestamp in timestamps])

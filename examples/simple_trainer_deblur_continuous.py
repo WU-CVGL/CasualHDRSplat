@@ -56,7 +56,7 @@ class DeblurConfig(Config):
     # data_dir: str = "/home/cvgluser/blender/blender-3.6.13-linux-x64/data/deblurnerf/rawdata_new_tra1/cozyroom/process"
     # data_dir: str = "/datasets/HDR-Bad-Gaussian/scannet_restored/scene0072_01/dpvslam"
     # data_dir: str = "/datasets/HDR-Bad-Gaussian/bags/hdr_toufu_feat_ltdz20240920-012300/dpvslam"
-    data_dir: str = "/datasets/HDR-Bad-Gaussian/pixel8pro/processed_2024_09_24_13_57_43-0/dpvslam"
+    data_dir: str = "/datasets/HDR-Bad-Gaussian/pixel8pro/temp/processed_2024_09_24_13_57_43-262/dpvslam"
 
     # Downsample factor for the dataset
     data_factor: int = 2
@@ -70,7 +70,7 @@ class DeblurConfig(Config):
     # result_dir: str = "results/hdr_ikun_mcmc_500k_grad25_explr_1e-4"
     # result_dir: str = "results/toufu3_dpvslam"
     # result_dir: str = "results/pixel8pro/hdr_toufu_feat_ltdz20240920_dpvslam"
-    result_dir: str = "results/pixel8pro/processed_2024_09_24_13_57_43-0_dpvslam"
+    result_dir: str = "results/pixel8pro/temp/processed_2024_09_24_13_57_43-262_dpvslam"
     # Every N images there is a test image
     test_every: int = 9999
 
@@ -816,6 +816,7 @@ class DeblurRunner(Runner):
                 if cfg.nvs_eval_enable_during_training and self.valset is not None:
                     self.eval_with_pose_opt(step, "nvs", self.valset)
 
+                self.eval_traj(step)
                 # FIXME: SLOW! (0.5fps)
                 # self.render_traj(step)
 
@@ -1082,7 +1083,7 @@ class DeblurRunner(Runner):
         colmap_image_ids = torch.tensor(np.stack(colmap_image_ids).astype(np.int32)).to(self.device)
         # then get the poses
         poses, _ = self.camera_trajectory(colmap_image_ids, cfg.image_timestamp_type)
-        timestamps = self.parser.timestamps[colmap_image_ids.cpu()]
+        timestamps = self.parser.timestamps[colmap_image_ids.cpu()] + self.parser.timestamps_begin
         positions_xyz = poses.translation().cpu().numpy()
         orientations_quat_xyzw = poses.rotation().cpu().numpy()
         orientations_quat_wxyz = orientations_quat_xyzw[:, [3, 0, 1, 2]]
@@ -1122,9 +1123,9 @@ def main(local_rank: int, world_rank, world_size: int, cfg: DeblurConfig):
             runner.splats[k].data = torch.cat([ckpt["splats"][k].detach().to(runner.device) for ckpt in ckpts])
         runner.camera_trajectory.load_state_dict(ckpts[0]["camera_trajectory"])
         step = ckpts[0]["step"]
-        # runner.eval_deblur(step, "deblur", runner.testset)
-        # if runner.valset is not None:
-        #     runner.eval_with_pose_opt(step, "nvs", runner.valset)
+        runner.eval_deblur(step, "deblur", runner.testset)
+        if runner.valset is not None:
+            runner.eval_with_pose_opt(step, "nvs", runner.valset)
         runner.eval_traj(step)
         runner.render_traj(step=step)
     else:
