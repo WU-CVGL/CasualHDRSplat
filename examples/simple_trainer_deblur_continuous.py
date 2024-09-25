@@ -445,14 +445,16 @@ class DeblurRunner(Runner):
             colors = torch.stack(colors_list)
 
         rasterize_mode = "antialiased" if self.cfg.antialiased else "classic"
-        render_colors, render_alphas, info = rasterization(
+        distributed = self.world_size > 1
+
+        render_current_images = lambda viewmats, Ks, colors: rasterization(
             means=means,
             quats=quats,
             scales=scales,
             opacities=opacities,
             colors=colors,
-            viewmats=torch.linalg.inv(camtoworlds),  # [C, 4, 4]
-            Ks=Ks,  # [C, 3, 3]
+            viewmats=viewmats,
+            Ks=Ks,
             width=width,
             height=height,
             packed=self.cfg.packed,
@@ -463,9 +465,27 @@ class DeblurRunner(Runner):
             ),
             sparse_grad=self.cfg.sparse_grad,
             rasterize_mode=rasterize_mode,
-            distributed=self.world_size > 1,
+            distributed=distributed,
             **kwargs,
         )
+        render_colors = []
+        render_alphas = []
+        infos = []
+        info = {}
+        if distributed:
+            for viewmat, K, color in zip(camtoworlds, Ks, colors):
+                render_color, render_alpha, info = render_current_images(viewmat[None,], K[None,], color)
+                render_colors.append(render_color)
+                render_alphas.append(render_alpha)
+                infos.append(info)
+            render_colors = torch.cat(render_colors, dim=0)
+            render_alphas = torch.cat(render_alphas, dim=0)
+            for key in infos[0].keys():
+                info[key] = torch.cat([i[key] for i in infos], dim=0) if isinstance(infos[0][key], Tensor) \
+                    else None if (infos[0][key] is None) else [i[key] for i in infos]
+            return render_colors, render_alphas, info
+        else:
+            render_colors, render_alphas, info = render_current_images(camtoworlds, Ks, colors)
         return render_colors, render_alphas, info
 
     def train(self):
@@ -682,7 +702,10 @@ class DeblurRunner(Runner):
 
                 # monitor pose optimization
                 metrics_dict = {}
-                self.camera_trajectory.get_metrics_dict(metrics_dict)
+                if world_size > 1:
+                    self.camera_trajectory.module.get_metrics_dict(metrics_dict)
+                else:
+                    self.camera_trajectory.get_metrics_dict(metrics_dict)
                 self.writer.add_scalar(
                     "train/camera_opt_translation",
                     metrics_dict["camera_opt_translation"],
