@@ -20,7 +20,7 @@ do
         --nvs_eval_end 20 \
         --use_bilateral_grid \
         --render_traj_path $RENDER_TRAJ_PATH \
-        --data_dir $SCENE_DIR/$SCENE/dpvslam/ \
+        --data_dir $SCENE_DIR/$SCENE/dpvslam_pruned/process \
         --result_dir $RESULT_DIR/$SCENE/bilagrid_deblur &
     CUDA_VISIBLE_DEVICES=1 python simple_trainer_deblur.py \
         mcmc \
@@ -31,7 +31,7 @@ do
         --nvs_on_contiguous_images \
         --use_bilateral_grid \
         --render_traj_path $RENDER_TRAJ_PATH \
-        --data_dir $SCENE_DIR/$SCENE/dpvslam/ \
+        --data_dir $SCENE_DIR/$SCENE/dpvslam_pruned/process \
         --result_dir $RESULT_DIR/$SCENE/bilagrid_nodeblur
 done
 
