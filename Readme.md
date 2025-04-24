@@ -5,7 +5,7 @@ ArXiv 2025</h2>
     <a href="https://github.com/TeaDrinkingGong">Shucheng Gong</a><sup>1,2*</sup> &emsp;&emsp;
     <a href="https://github.com/LingzheZhao">Lingzhe Zhao</a><sup>1*</sup> &emsp;&emsp;
     <a href="https://akawincent.github.io">Wenpu Li</a><sup>1*</sup> &emsp;&emsp;
-    Xiang Liu<sup>1,3</sup> &emsp;&emsp;
+    Xiang Liu<sup>1,3</sup> &emsp;&emsp; </br>
     Yin Zhang<sup>1,4</sup> &emsp;&emsp;
     Shiyu Zhao<sup>1</sup> &emsp;&emsp;
     Hong Xie<sup>2</sup> &emsp;&emsp;
