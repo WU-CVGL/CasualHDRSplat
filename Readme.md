@@ -1,6 +1,6 @@
-<h1 align="center">CasualHDRSplat: Robust High Dynamic Range 3D Gaussian Splatting from
-Casually Captured Videos </h1>
-<h2 align="center">ArXiv 2025 </h2>
+<h2 align="center">CasualHDRSplat: Robust High Dynamic Range 3D Gaussian Splatting from
+Casually Captured Videos </br> </br>
+ArXiv 2025</h2>
 <p align="center">
     <a href="https://github.com/TeaDrinkingGong">Shucheng Gong</a><sup>1,2*</sup> &emsp;&emsp;
     <a href="https://github.com/LingzheZhao">Lingzhe Zhao</a><sup>1*</sup> &emsp;&emsp;
