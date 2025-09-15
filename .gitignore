@@ -132,9 +132,8 @@ examples/*.png
 
 examples/wandb
 
-gsplat/
+# gsplat/
 gsplat.egg-info/
 examples/results
-./sci-gsplat.tar.gz
 
 !examples/benchmarks/compression/results/

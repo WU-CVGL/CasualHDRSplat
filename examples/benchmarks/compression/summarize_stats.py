@@ -2,24 +2,14 @@ import json
 import os
 import subprocess
 from collections import defaultdict
+from typing import List
 
 import numpy as np
 import tyro
 
 
-def main(results_dir: str = "results/benchmark_mcmc_0_36M_png_compression"):
-    scenes = [
-        "garden",
-        "bicycle",
-        "stump",
-        "bonsai",
-        "counter",
-        "kitchen",
-        "room",
-        "treehill",
-        "flowers",
-    ]
-    stage = "compress"
+def main(results_dir: str, scenes: List[str], stage: str = "compress"):
+    print("scenes:", scenes)
 
     summary = defaultdict(list)
     for scene in scenes:
@@ -42,7 +32,11 @@ def main(results_dir: str = "results/benchmark_mcmc_0_36M_png_compression"):
                 summary[k].append(v)
 
     for k, v in summary.items():
-        print(k, np.mean(v))
+        summary[k] = np.mean(v)
+    summary["scenes"] = scenes
+
+    with open(os.path.join(results_dir, f"{stage}_summary.json"), "w") as f:
+        json.dump(summary, f, indent=2)
 
 
 if __name__ == "__main__":

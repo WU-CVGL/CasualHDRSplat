@@ -1,3 +1,4 @@
+import json
 import os
 from typing import Any, Dict, List, Optional
 
@@ -52,6 +53,7 @@ class Dataset:
         K = self.parser.Ks_dict[camera_id].copy()  # undistorted K
         params = self.parser.params_dict[camera_id]
         camtoworlds = self.parser.camtoworlds[index]
+        mask = self.parser.mask_dict[camera_id]
 
         if len(params) > 0:
             # Images are distorted. Undistort them.
@@ -79,6 +81,8 @@ class Dataset:
             "image_id": item,  # the index of the image in the dataset
             "colmap_image_id": index,  # the index of the image in the colmap data
         }
+        if mask is not None:
+            data["mask"] = torch.from_numpy(mask).bool()
 
         if self.load_depths:
             # projected points to image plane to get depths
@@ -110,7 +114,6 @@ if __name__ == "__main__":
     import argparse
 
     import imageio.v2 as imageio
-    import tqdm
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_dir", type=str, default="data/360_v2/garden")
@@ -125,7 +128,7 @@ if __name__ == "__main__":
     print(f"Dataset: {len(dataset)} images.")
 
     writer = imageio.get_writer("results/points.mp4", fps=30)
-    for data in tqdm.tqdm(dataset, desc="Plotting points"):
+    for data in tqdm(dataset, desc="Plotting points"):
         image = data["image"].numpy().astype(np.uint8)
         points = data["points"].numpy()
         depths = data["depths"].numpy()

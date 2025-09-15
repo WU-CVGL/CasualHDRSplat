@@ -34,23 +34,14 @@ def get_extensions():
     from torch.__config__ import parallel_info
     from torch.utils.cpp_extension import CUDAExtension
 
-    extensions_dir_v1 = osp.join("gsplat", "cuda_legacy", "csrc")
-    sources_v1 = glob.glob(osp.join(extensions_dir_v1, "*.cu")) + glob.glob(
-        osp.join(extensions_dir_v1, "*.cpp")
+    extensions_dir = osp.join("gsplat", "cuda")
+    sources = glob.glob(osp.join(extensions_dir, "csrc", "*.cu")) + glob.glob(
+        osp.join(extensions_dir, "csrc", "*.cpp")
     )
-    sources_v1 = [path for path in sources_v1 if "hip" not in path]
-
-    extensions_dir_v2 = osp.join("gsplat", "cuda", "csrc")
-    sources_v2 = glob.glob(osp.join(extensions_dir_v2, "*.cu")) + glob.glob(
-        osp.join(extensions_dir_v2, "*.cpp")
-    )
-    sources_v2 = [path for path in sources_v2 if "hip" not in path]
+    sources += [osp.join(extensions_dir, "ext.cpp")]
 
     undef_macros = []
     define_macros = []
-
-    if sys.platform == "win32":
-        define_macros += [("gsplat_EXPORTS", None)]
 
     extra_compile_args = {"cxx": ["-O3"]}
     if not os.name == "nt":  # Not on Windows:
@@ -78,7 +69,7 @@ def get_extensions():
 
     nvcc_flags = os.getenv("NVCC_FLAGS", "")
     nvcc_flags = [] if nvcc_flags == "" else nvcc_flags.split(" ")
-    nvcc_flags += ["-O3", "--use_fast_math"]
+    nvcc_flags += ["-O3", "--use_fast_math", "-std=c++17"]
     if LINE_INFO:
         nvcc_flags += ["-lineinfo"]
     if torch.version.hip:
@@ -89,34 +80,29 @@ def get_extensions():
     else:
         nvcc_flags += ["--expt-relaxed-constexpr"]
 
-    # GLM has spammy and very annoyingly verbose warnings that this suppresses
-    nvcc_flags += ["-diag-suppress", "20012"]
+    # GLM/Torch has spammy and very annoyingly verbose warnings that this suppresses
+    nvcc_flags += ["-diag-suppress", "20012,186"]
     extra_compile_args["nvcc"] = nvcc_flags
     if sys.platform == "win32":
-        extra_compile_args["nvcc"] += ["-DWIN32_LEAN_AND_MEAN"]
+        extra_compile_args["nvcc"] += [
+            "-DWIN32_LEAN_AND_MEAN",
+            "-allow-unsupported-compiler",
+        ]
 
     current_dir = pathlib.Path(__file__).parent.resolve()
-    glm_path = os.path.join(current_dir, "gsplat", "cuda", "csrc", "third_party", "glm")
-    extension_v1 = CUDAExtension(
-        "gsplat.csrc_legacy",
-        sources_v1,
-        include_dirs=[extensions_dir_v2, glm_path],  # glm lives in v2.
-        define_macros=define_macros,
-        undef_macros=undef_macros,
-        extra_compile_args=extra_compile_args,
-        extra_link_args=extra_link_args,
-    )
-    extension_v2 = CUDAExtension(
-        "gsplat.csrc",
-        sources_v2,
-        include_dirs=[extensions_dir_v2, glm_path],  # glm lives in v2.
-        define_macros=define_macros,
-        undef_macros=undef_macros,
-        extra_compile_args=extra_compile_args,
-        extra_link_args=extra_link_args,
-    )
+    glm_path = osp.join(current_dir, "gsplat", "cuda", "csrc", "third_party", "glm")
+    include_dirs = [glm_path, osp.join(current_dir, "gsplat", "cuda", "include")]
 
-    return [extension_v1, extension_v2]
+    extension = CUDAExtension(
+        "gsplat.csrc",
+        sources,
+        include_dirs=include_dirs,
+        define_macros=define_macros,
+        undef_macros=undef_macros,
+        extra_compile_args=extra_compile_args,
+        extra_link_args=extra_link_args,
+    )
+    return [extension]
 
 
 setup(

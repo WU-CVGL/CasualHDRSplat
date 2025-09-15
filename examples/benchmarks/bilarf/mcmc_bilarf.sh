@@ -1,4 +1,4 @@
-SCENE_DIR="$HOME/data/bilarf/bilarf_data/editscenes"
+SCENE_DIR="data/bilarf/bilarf_data/editscenes"
 SCENE_LIST="rawnerf_windowlegovary rawnerf_sharpshadow scibldg"
 
 # SCENE_DIR="data/bilarf/bilarf_data/testscenes"
