@@ -1,87 +1,73 @@
-# gsplat
+<h2 align="center">Casual3DHDR: High Dynamic Range 3D Gaussian Splatting from Casually Captured Videos </br> </br>
+ACM Multimedia 2025</h2>
+<p align="center">
+    <a href="https://github.com/TeaDrinkingGong">Shucheng Gong</a><sup>1,2*</sup> &emsp;&emsp;
+    <a href="https://github.com/LingzheZhao">Lingzhe Zhao</a><sup>1*</sup> &emsp;&emsp;
+    <a href="https://akawincent.github.io">Wenpu Li</a><sup>1*</sup> &emsp;&emsp;
+    Hong Xie<sup>2</sup> &emsp;&emsp;
+    Yin Zhang<sup>1,3</sup> &emsp;&emsp;
+    Shiyu Zhao<sup>1</sup> &emsp;&emsp;
+    <a href="https://ethliup.github.io/">Peidong Liu</a><sup>1†</sup>
+</p>
 
-[![Core Tests.](https://github.com/nerfstudio-project/gsplat/actions/workflows/core_tests.yml/badge.svg?branch=main)](https://github.com/nerfstudio-project/gsplat/actions/workflows/core_tests.yml)
-[![Docs](https://github.com/nerfstudio-project/gsplat/actions/workflows/doc.yml/badge.svg?branch=main)](https://github.com/nerfstudio-project/gsplat/actions/workflows/doc.yml)
+<p align="center">
+    <sup>*</sup>equal contribution &emsp;&emsp; <sup>†</sup> denotes corresponding author.
+</p>
 
-[http://www.gsplat.studio/](http://www.gsplat.studio/)
+<p align="center">
+    <sup>1</sup>Westlake University &emsp;&emsp;
+    <sup>2</sup>Wuhan University &emsp;&emsp;
+    <sup>3</sup>Zhejiang University &emsp;&emsp;
+</p>
 
-gsplat is an open-source library for CUDA accelerated rasterization of gaussians with python bindings. It is inspired by the SIGGRAPH paper [3D Gaussian Splatting for Real-Time Rendering of Radiance Fields](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/), but we’ve made gsplat even faster, more memory efficient, and with a growing list of new features! 
+<hr>
 
-<div align="center">
-  <video src="https://github.com/nerfstudio-project/gsplat/assets/10151885/64c2e9ca-a9a6-4c7e-8d6f-47eeacd15159" width="100%" />
+<h5 align="center">
+
+[![arXiv](https://img.shields.io/badge/Arxiv-2504.17728-b31b1b.svg?logo=arXiv)](https://arxiv.org/abs/2504.17728)
+<!-- [![pdf](https://img.shields.io/badge/PDF-Paper-orange.svg?logo=GoogleDocs)](./doc/2024_ECCV_BeNeRF_camera_ready_paper.pdf)  -->
+<!-- [![pdf](https://img.shields.io/badge/PDF-Supplementary-orange.svg?logo=GoogleDocs)](./doc/2024_ECCV_BeNeRF_camera_ready_supplementary.pdf)  -->
+<!-- [![pdf](https://img.shields.io/badge/PDF-Poster-orange.svg?logo=GoogleDocs)](https://akawincent.github.io/BeNeRF/demo/Poster.pdf)  -->
+[![Home Page](https://img.shields.io/badge/GitHubPages-ProjectPage-blue.svg?logo=GitHubPages)](https://lingzhezhao.github.io/CasualHDRSplat/)
+<!-- [![Paper With Code](https://img.shields.io/badge/Website-PaperwithCode-yellow.svg?logo=paperswithcode)](https://paperswithcode.com/paper/benerf-neural-radiance-fields-from-a-single)   -->
+<!-- [![Dataset](https://img.shields.io/badge/OneDrive-Dataset-green.svg?logo=ProtonDrive)](https://westlakeu-my.sharepoint.com/:f:/g/personal/cvgl_westlake_edu_cn/EjZNs8MwoXBDqT61v_j5V3EBIoKb8dG9KlYtYmLxcNJG_Q?e=AFXeUB) -->
+![GitHub Repo stars](https://img.shields.io/github/stars/WU-CVGL/CasualHDRSplat)
+
+</h5>
+<p align="center">
+    <img src="./assets/teaser.png" alt="Pipeline" style="width:75%; height:auto;">
+</p>
+
+> a) Our method can reconstruct 3D HDR scenes from videos casually captured with auto-exposure enabled. b) Our approach achieves superior rendering quality compared to methods like Gaussian-W and HDR-Plenoxels. c) After 3D HDR reconstruction, we can not only synthesize novel view, but also perform various downstream tasks, such as 1) HDR exposure editing, 2) Image deblurring.
+
+
+## 📋 Pipeline
+
+<p align="center">
+    <img src="./assets/pipeline.png" alt="Pipeline" style="width:75%; height:auto;">
+</p>
+
+<div>
+Given a casually captured video with auto exposure, camera motion blur, and significant exposure time changes, we train 3DGS to reconstruct an HDR scene. We design a unified model based on the physical image formation process, integrating camera motion blur and exposure-induced brightness variations. This allows for the joint estimation of camera motion, exposure time, and camera response curve while reconstructing the HDR scene. After training, our method can sharpen the train images and render HDR and LDR images from specified poses.
 </div>
 
-## Installation
+## 🛠️ WIP
 
-**Dependence**: Please install [Pytorch](https://pytorch.org/get-started/locally/) first.
+WIP...
 
+## Acknowledgments
 
+We specially thank [Xiang Liu](https://www.linkedin.com/in/xiang-liu-535219183/) for his kind and valuable suggestions during the writing of this paper.
 
+## Bibtex
 
-The easiest way is to install from PyPI. In this way it will build the CUDA code **on the first run** (JIT).
+If you find this useful, please consider citing:
 
-```bash
-pip install gsplat
-```
-
-Or install from source. In this way it will build the CUDA code during installation.
-
-```bash
-pip install git+https://github.com/nerfstudio-project/gsplat.git
-```
-
-To install gsplat on Windows, please check [this instruction](docs/INSTALL_WIN.md).
-
-## Evaluation
-
-This repo comes with a standalone script that reproduces the official Gaussian Splatting with exactly the same performance on PSNR, SSIM, LPIPS, and converged number of Gaussians. Powered by gsplat’s efficient CUDA implementation, the training takes up to **4x less GPU memory** with up to **15% less time** to finish than the official implementation. Full report can be found [here](https://docs.gsplat.studio/main/tests/eval.html).
-
-```bash
-# under examples/
-pip install -r requirements.txt
-# download mipnerf_360 benchmark data
-python datasets/download_dataset.py
-# run batch evaluation
-bash benchmarks/basic.sh
-```
-
-## Examples
-
-We provide a set of examples to get you started! Below you can find the details about
-the examples (requires to install some exta dependencies via `pip install -r examples/requirements.txt`)
-
-- [Train a 3D Gaussian splatting model on a COLMAP capture.](https://docs.gsplat.studio/main/examples/colmap.html)
-- [Fit a 2D image with 3D Gaussians.](https://docs.gsplat.studio/main/examples/image.html)
-- [Render a large scene in real-time.](https://docs.gsplat.studio/main/examples/large_scale.html)
-
-
-## Development and Contribution
-
-This repository was born from the curiosity of people on the Nerfstudio team trying to understand a new rendering technique. We welcome contributions of any kind and are open to feedback, bug-reports, and improvements to help expand the capabilities of this software.
-
-This project is developed by the following wonderful contributors (unordered):
-
-- [Angjoo Kanazawa](https://people.eecs.berkeley.edu/~kanazawa/) (UC Berkeley): Mentor of the project.
-- [Matthew Tancik](https://www.matthewtancik.com/about-me) (Luma AI): Mentor of the project.
-- [Vickie Ye](https://people.eecs.berkeley.edu/~vye/) (UC Berkeley): Project lead. v0.1 lead.
-- [Matias Turkulainen](https://maturk.github.io/) (Aalto University): Core developer.
-- [Ruilong Li](https://www.liruilong.cn/) (UC Berkeley): Core developer. v1.0 lead.
-- [Justin Kerr](https://kerrj.github.io/) (UC Berkeley): Core developer.
-- [Brent Yi](https://github.com/brentyi) (UC Berkeley): Core developer.
-- [Zhuoyang Pan](https://panzhy.com/) (ShanghaiTech University): Core developer.
-- [Jianbo Ye](http://www.jianboye.org/) (Amazon): Core developer.
-
-We also have made the mathematical supplement, with conventions and derivations, available [here](https://arxiv.org/abs/2312.02121). If you find this library useful in your projects or papers, please consider citing:
-
-```
-@misc{ye2023mathematical,
-    title={Mathematical Supplement for the $\texttt{gsplat}$ Library}, 
-    author={Vickie Ye and Angjoo Kanazawa},
-    year={2023},
-    eprint={2312.02121},
-    archivePrefix={arXiv},
-    primaryClass={cs.MS}
+```bibtex
+@inproceedings{gong2025casual3dhdr,
+    title={{Casual3DHDR: High Dynamic Range 3D Gaussian Splatting from Casually Captured Videos}},
+    author={Gong, Shucheng and Zhao, Lingzhe and Li, Wenpu and Xie, Hong and Zhang, Yin and Zhao, Shiyu and Liu, Peidong},
+    booktitle={In Proceedings of the 33rd ACM International Conference on Multimedia (MM ’25)},
+    year={2025},
 }
 ```
-
-We welcome contributions of any kind and are open to feedback, bug-reports, and improvements to help expand the capabilities of this software. Please check [docs/DEV.md](docs/DEV.md) for more info about development.
