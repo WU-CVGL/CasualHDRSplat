@@ -562,6 +562,7 @@ class ColmapParser:
                     self.downscale_rounding_mode,
                     nearest_neighbor=False,
                 )
+                # TODO: Dropped support for mask for now
                 if len(mask_filenames) > 0:
                     raise NotImplementedError
                 if len(depth_filenames) > 0:

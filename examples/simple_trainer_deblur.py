@@ -4,39 +4,41 @@ import os
 import time
 import yaml
 from collections import defaultdict
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List
 from typing_extensions import assert_never
 
 import imageio
 import numpy as np
-import torch
-import torch.nn.functional as F
 import tqdm
 import tyro
-import viser
-from dataclasses import dataclass, field
-from fused_ssim import fused_ssim
-from gsplat.distributed import cli
-from gsplat.strategy import DefaultStrategy, MCMCStrategy
-from nerfview.viewer import Viewer
+
+import torch
+import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
 from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 
+import viser
+from fused_ssim import fused_ssim
+from gsplat.distributed import cli
+from gsplat.strategy import DefaultStrategy, MCMCStrategy
+
 from badgs.bad_camera_optimizer import BadCameraOptimizer, BadCameraOptimizerConfig
 from datasets.colmap import Dataset
 from datasets.colmap_dataparser import ColmapParser
 from datasets.deblur_nerf import DeblurNerfDataset
-from pose_viewer import PoseViewer
-from simple_trainer import Config, Runner, create_splats_with_optimizers
+from gsplat_viewer import GsplatViewer
 from lib_bilagrid import (
     BilateralGrid,
     slice,
     color_correct,
     total_variation_loss,
 )
+from pose_viewer import PoseViewer
+from simple_trainer import Config, Runner, create_splats_with_optimizers
 from utils import (
     AppearanceOptModule,
     CameraOptModuleSE3,
@@ -323,12 +325,14 @@ class DeblurRunner(Runner):
                 self.viewer = PoseViewer(
                     server=self.server,
                     render_fn=self._viewer_render_fn,
+                    output_dir=Path(cfg.result_dir),
                     mode="training",
                 )
             else:
-                self.viewer = Viewer(
+                self.viewer = GsplatViewer(
                     server=self.server,
                     render_fn=self._viewer_render_fn,
+                    output_dir=Path(cfg.result_dir),
                     mode="training",
                 )
 
@@ -395,7 +399,7 @@ class DeblurRunner(Runner):
         pbar = tqdm.tqdm(range(init_step, max_steps))
         for step in pbar:
             if not cfg.disable_viewer:
-                while self.viewer.state.status == "paused":
+                while self.viewer.state == "paused":
                     time.sleep(0.01)
                 self.viewer.lock.acquire()
                 tic = time.time()
@@ -676,7 +680,7 @@ class DeblurRunner(Runner):
                         num_train_rays_per_step * num_train_steps_per_sec
                 )
                 # Update the viewer state.
-                self.viewer.state.num_train_rays_per_sec = num_train_rays_per_sec
+                self.viewer.render_tab_state.num_train_rays_per_sec = num_train_rays_per_sec
                 # Update the scene.
                 self.viewer.update(step, num_train_rays_per_step)
 

@@ -53,7 +53,8 @@ class Dataset:
         K = self.parser.Ks_dict[camera_id].copy()  # undistorted K
         params = self.parser.params_dict[camera_id]
         camtoworlds = self.parser.camtoworlds[index]
-        mask = self.parser.mask_dict[camera_id]
+        # TODO: Dropped support for mask for now
+        # mask = self.parser.mask_dict[camera_id]
 
         if len(params) > 0:
             # Images are distorted. Undistort them.
@@ -81,8 +82,9 @@ class Dataset:
             "image_id": item,  # the index of the image in the dataset
             "colmap_image_id": index,  # the index of the image in the colmap data
         }
-        if mask is not None:
-            data["mask"] = torch.from_numpy(mask).bool()
+        # TODO: Dropped support for mask for now
+        # if mask is not None:
+        #     data["mask"] = torch.from_numpy(mask).bool()
 
         if self.load_depths:
             # projected points to image plane to get depths

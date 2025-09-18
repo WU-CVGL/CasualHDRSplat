@@ -4,15 +4,15 @@ import numpy as np
 import torch
 import viser
 import viser.transforms as vtf
-from nerfview.viewer import Viewer
 
 from datasets.colmap import Dataset
+from gsplat_viewer import GsplatViewer
 
 # not used for now
 VISER_NERFSTUDIO_SCALE_RATIO: float = 10.0
 
 
-class PoseViewer(Viewer):
+class PoseViewer(GsplatViewer):
 
     def init_scene(self,
                    train_dataset: Dataset,
@@ -65,7 +65,7 @@ class PoseViewer(Viewer):
             self.camera_handles[idx] = camera_handle
             self.original_c2w[idx] = c2w
 
-        self.state.status = train_state
+        self.state = train_state
         # self.train_util = 0.9
 
     def update_camera_poses(self, camtoworlds):

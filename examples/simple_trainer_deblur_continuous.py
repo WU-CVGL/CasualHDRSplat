@@ -2,43 +2,47 @@ import json
 import math
 import os
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Literal, Optional, Tuple
 from typing_extensions import assert_never
 
 import imageio
 import numpy as np
-import torch
-import torch.nn.functional as F
 import tqdm
 import tyro
-import viser
 import yaml
-from evo.core.trajectory import PoseTrajectory3D
-from evo.tools.file_interface import write_tum_trajectory_file
-from dataclasses import dataclass, field
-from gsplat.distributed import cli
-from gsplat.rendering import rasterization
+
+import torch
+import torch.nn.functional as F
 from torch import Tensor
 from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.tensorboard import SummaryWriter
+from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
+from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
+
+import viser
+from evo.core.trajectory import PoseTrajectory3D
+from evo.tools.file_interface import write_tum_trajectory_file
+from fused_ssim import fused_ssim
+from gsplat.cuda._wrapper import spherical_harmonics
+from gsplat.distributed import cli
+from gsplat.rendering import rasterization
+from gsplat.strategy import DefaultStrategy, MCMCStrategy
+
 from datasets.colmap import Dataset
 from datasets.colmap_dataparser import ColmapParser
 from datasets.deblur_nerf import DeblurNerfDataset
 from datasets.hdr_deblur_nerf import HdrDeblurNerfDataset
 from datasets.traj import generate_interpolated_path
-from fused_ssim import fused_ssim
-from gsplat.cuda._wrapper import spherical_harmonics
-from gsplat.strategy import DefaultStrategy, MCMCStrategy
-from nerfview.viewer import Viewer
+from gsplat_viewer import GsplatViewer
 from pose_viewer import PoseViewer
 from simple_trainer import Config, Runner, create_splats_with_optimizers
-from torch.utils.tensorboard import SummaryWriter
-from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
-from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 from utils import (
     CameraOptModuleSE3,
     set_random_seed,
 )
+
 from badgs.camera_trajectory import CameraTrajectory, CameraTrajectoryConfig
 from badgs.exposure_time_optimizer import ExposureTimeOptimizerConfig
 from badgs.spline import SplineConfig
@@ -393,12 +397,14 @@ class DeblurRunner(Runner):
                 self.viewer = PoseViewer(
                     server=self.server,
                     render_fn=self._viewer_render_fn,
+                    output_dir=Path(cfg.result_dir),
                     mode="training",
                 )
             else:
-                self.viewer = Viewer(
+                self.viewer = GsplatViewer(
                     server=self.server,
                     render_fn=self._viewer_render_fn,
+                    output_dir=Path(cfg.result_dir),
                     mode="training",
                 )
 
@@ -408,6 +414,9 @@ class DeblurRunner(Runner):
             Ks: Tensor,
             width: int,
             height: int,
+            masks: Optional[Tensor] = None,
+            rasterize_mode: Optional[Literal["classic", "antialiased"]] = None,
+            camera_model: Optional[Literal["pinhole", "ortho", "fisheye"]] = None,
             colmap_image_ids: Tensor = None,
             exposure_time: Tensor = None,
             **kwargs,
@@ -444,7 +453,11 @@ class DeblurRunner(Runner):
                 colors_list.append(c)
             colors = torch.stack(colors_list)
 
-        rasterize_mode = "antialiased" if self.cfg.antialiased else "classic"
+        if rasterize_mode is None:
+            rasterize_mode = "antialiased" if self.cfg.antialiased else "classic"
+        if camera_model is None:
+            camera_model = self.cfg.camera_model
+
         distributed = self.world_size > 1
 
         render_current_images = lambda viewmats, Ks, colors: rasterization(
@@ -548,7 +561,7 @@ class DeblurRunner(Runner):
         pbar = tqdm.tqdm(range(init_step, max_steps))
         for step in pbar:
             if not cfg.disable_viewer:
-                while self.viewer.state.status == "paused":
+                while self.viewer.state == "paused":
                     time.sleep(0.01)
                 self.viewer.lock.acquire()
                 tic = time.time()
@@ -850,7 +863,7 @@ class DeblurRunner(Runner):
                         num_train_rays_per_step * num_train_steps_per_sec
                 )
                 # Update the viewer state.
-                self.viewer.state.num_train_rays_per_sec = num_train_rays_per_sec
+                self.viewer.render_tab_state.num_train_rays_per_sec = num_train_rays_per_sec
                 # Update the scene.
                 self.viewer.update(step, num_train_rays_per_step)
 

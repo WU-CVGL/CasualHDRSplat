@@ -122,7 +122,7 @@ def main(local_rank: int, world_rank, world_size: int, args):
     # register and open viewer
     @torch.no_grad()
     def viewer_render_fn(camera_state: CameraState, render_tab_state: RenderTabState):
-        assert isinstance(render_tab_state, GsplatRenderTabState)
+        assert isinstance(render_tab_state, GsplatRenderTabState), print(render_tab_state)
         if render_tab_state.preview_render:
             width = render_tab_state.render_width
             height = render_tab_state.render_height
