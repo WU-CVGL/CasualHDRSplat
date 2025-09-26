@@ -65,7 +65,7 @@ class PoseViewer(Viewer):
             self.camera_handles[idx] = camera_handle
             self.original_c2w[idx] = c2w
 
-        self.state.status = train_state
+        self.state = train_state
         # self.train_util = 0.9
 
     def update_camera_poses(self, camtoworlds):
